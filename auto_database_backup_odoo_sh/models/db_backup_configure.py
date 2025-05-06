@@ -93,11 +93,11 @@ class DbBackupConfigure(models.Model):
         zip_path = "backup.daily"
         temp_dir = tempfile.mkdtemp()
         found = False
-        if not zip_path:
-            _logger.warning(f"Le dossier {zip_path} est introuvable")
-            raise UserError(_("Le dossier de sauvegarde 'backup.daily' est introuvable. Vérifiez la configuration de votre environnement."))
         _logger.debug("Scanning directory: %s", zip_path)
         entries = os.listdir(zip_path)
+        if not entries:
+            _logger.warning(f"Le dossier {zip_path} est introuvable")
+            raise UserError(_("Le dossier de sauvegarde 'backup.daily' est introuvable. Vérifiez la configuration de votre environnement."))
         _logger.debug("Entries found: %s", entries)
         for f in entries:
             _logger.debug("Checking entry: %s", f)
