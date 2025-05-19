@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en" xmlns="http://www.w3.org/1999/html">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Odoo.sh Backup to Cloud</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css">
+  <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/font-awesome/4.5.0/css/font-awesome.min.css">
+  <style>
+  .hero-title {
+    font-family: Montserrat, sans-serif;
+    font-size: 60px;
+    font-weight: 800;
+    color: #8aaebb;
+    margin-bottom: 10px;
+  }
+    .subtitle {
+      color: #74788D;
+      font-size: 20px;
+      text-transform: uppercase;
+      letter-spacing: 3px;
+    }
+
+    .highlight-box {
+      background-color: #f4f4f4;
+      border-radius: 8px;
+      padding: 20px;
+      margin-bottom: 20px;
+      box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+    }
+
+    .highlight-icon {
+      height: 40px;
+      margin-right: 15px;
+    }
+
+    .feature-card {
+      border: 1px solid #ddd;
+      border-radius: 10px;
+      padding: 20px;
+      height: 100%;
+      box-shadow: 0px 3px 8px rgba(0, 0, 0, 0.08);
+    }
+
+    .footer-logo {
+      width: 150px;
+      margin-top: 40px;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="container text-center my-5">
+    <h1 style="font-family: Montserrat, sans-serif; font-size: 40px; color: #8aaebb; margin-bottom: 10px; font-weight: 800;">
+      Backup Odoo.sh to Google Drive / OneDrive
+    </h1>
+
+    <p style="font-size:18px; color:#74788D; text-transform:uppercase; letter-spacing:3px; font-weight:500; margin-bottom:25px;">
+      Solution for outsourcing backup Odoo.sh
+    </p>
+    <img src="assets/nuxly_logo_fixed.png" class="my-4 img-fluid" style="max-width: 200px;" alt="Nuxly Logo">
+  </div>
+
+
+  <div class="container">
+    <h2 class="text-center mb-4" style="color: #3b3b3b;">Key Features</h2>
+    <div class="row">
+      <div class="col-md-6">
+        <div style="display:flex; align-items:center; padding:15px; border:1px solid #eee; border-radius:8px; margin-bottom:15px; background:#f9f9f9;">
+          <img src="assets/icons/cloud-computing.svg" style="width:40px; height:40px; margin-right:15px;">
+          <span style="font-size:16px; color:#333;">Direct upload from Odoo.sh to Google Drive / OneDrive</span>
+        </div>
+      </div>
+      <div class="col-md-6">
+        <div style="display:flex; align-items:center; padding:15px; border:1px solid #eee; border-radius:8px; margin-bottom:15px; background:#f9f9f9;">
+          <img src="assets/icons/lock.svg" style="width:40px; height:40px; margin-right:15px;">
+          <span style="font-size:16px; color:#333;">No master password needed – token-based auth only</span>
+        </div>
+      </div>
+      <div class="col-md-6">
+        <div style="display:flex; align-items:center; padding:15px; border:1px solid #eee; border-radius:8px; margin-bottom:15px; background:#f9f9f9;">
+          <img src="assets/icons/clock.webp" style="width:40px; height:40px; margin-right:15px;">
+          <span style="font-size:16px; color:#333;">Scheduled cron with optional auto-cleanup</span>
+        </div>
+      </div>
+      <div class="col-md-6">
+        <div style="display:flex; align-items:center; padding:15px; border:1px solid #eee; border-radius:8px; margin-bottom:15px; background:#f9f9f9;">
+          <img src="assets/icons/folder-zip.svg" style="width:40px; height:40px; margin-right:15px;">
+          <span style="font-size:16px; color:#333;">Uploads zipped backups with logs</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+
+  <div class="container mt-5">
+    <h2 class="text-center mb-4" style="color: #3b3b3b;">Setup Steps</h2>
+    <ol class="list-group list-group-numbered">
+      <li class="list-group-item">Install module: <code style="color: #be1727;">auto_database_backup_odoo_sh</code></li>
+      <li class="list-group-item">In configuration choose destination: <strong>Odoo_sh Google Drive</strong> or <strong>Odoo_sh OneDrive</strong></li>
+      <li class="list-group-item">Configure OAuth client (ID, secret, folder id)</li>
+      <li class="list-group-item">Click "Setup Token" to authenticate</li>
+      <li class="list-group-item">Enable scheduled action</li>
+    </ol>
+  </div>
+  <div class="container mt-5">
+    <h2 class="text-center mb-4" style="color: #3b3b3b;">Why this Module?</h2>
+  
+    <div class="alert alert-info" style="font-size: 16px;">
+      <p>
+        This module was created as a lightweight extension of the excellent
+        <a href="https://apps.odoo.com/apps/modules/17.0/auto_database_backup/" target="_blank" style="color:#be1727;">
+          auto_database_backup
+        </a> module by CybroAddons.
+      </p>
+      <p>
+        On <strong>Odoo.sh</strong>, the original module cannot be used as-is because:
+      </p>
+      <ul>
+        <li>It requires the master password, which is not accessible on Odoo.sh</li>
+        <li>It tries to generate backups manually, which is restricted by Odoo.sh hosting</li>
+      </ul>
+      <p>
+        Our module simply reuses the daily backup already generated in <code style="color: #be1727;">/backup.daily</code> by Odoo.sh.
+        It zips it, and automatically uploads it to your chosen <strong>Google Drive</strong> or <strong>OneDrive</strong>.
+      </p>
+    </div>
+  </div>
+  
+  <div class="container mt-5">
+    <h2 class="text-center mb-4" style="color: #3b3b3b;">Configuration Help</h2>
+    <p>
+      To configure the required Google or Microsoft applications (Client ID / Secret / Redirect URI), you can refer to the official guide provided by CybroAddons:
+      <a href="https://apps.odoo.com/apps/modules/17.0/auto_database_backup/" target="_blank" style="color:#be1727;">
+        View Setup Guide
+      </a>.
+    </p>
+    <div class="alert alert-success mt-3">
+      <strong>🎥 Demo Available:</strong>
+      Watch the full video demonstration here:
+      <a href="https://drive.google.com/file/d/1DNgsRRfUMFVmpU0did78a2eqQ6EEjMtm/view?usp=sharing"
+         target="_blank" style="color:#be1727; font-weight:bold;">
+        Configuration + Tests (Video)
+      </a>
+    </div>
+    
+  </div>
+
+  <div class="container mt-5">
+    <h2 class="text-center mb-4" style="color: #3b3b3b;">Support & Contact</h2>
+    <div class="text-center">
+      <a href="mailto:bonjour@nuxly.com" class="btn btn-lg" style="background-color:#be1727; color:white; border:none; border-radius:6px; padding: 10px 10px 15px;">
+        <i class="fa fa-envelope" style="margin-right: 2px;"></i>
+        Contact Support
+      </a>      
+    </div>
+  </div>
+  
+  <div class="container text-center">
+    <img src="assets/nuxly_logo.webp" alt="Nuxly" class="footer-logo" style="width: 150px; padding: 2px;">
+    <p class="text-muted">
+        This module is maintained by <strong>Nuxly</strong>. Visit
+        <a href="https://nuxly.com" target="_blank" style="color: #be1727; text-decoration: underline;">nuxly.com</a>
+    </p>
+</div>
+
+</body>
+</html>
