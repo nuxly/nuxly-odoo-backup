@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 {
     'name': "Odoo.sh Backup to Cloud (Google Drive / OneDrive)",
-    'version': '16.0.1.0.0',
+    'version': '16.0.1.1.0',
     'summary': "Send Odoo.sh automatic backups to Google Drive / OneDrive",
     'description': """
       This module extends `auto_database_backup` to support additional cloud destinations for Odoo.sh:
@@ -14,7 +14,11 @@
     """,
     'author': "Nuxly",
     'category': 'Tools',
+    'website': "https://www.nuxly.com",
     'depends': ['auto_database_backup'],
+    'images': ['static/description/banner.gif'],
+    'external_dependencies': {
+        'python': ['dropbox', 'pyncclient', 'boto3', 'nextcloud-api-wrapper','paramiko']},
     'data': [
         'views/db_backup_configure_view.xml',
     ],
