@@ -18,6 +18,7 @@
     'data': [
         'views/db_backup_configure_view.xml',
     ],
+    'images': ['static/description/banner.gif'],
     'installable': True,
     'license': 'LGPL-3',
     'application': True,
