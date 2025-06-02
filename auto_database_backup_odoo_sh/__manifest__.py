@@ -14,7 +14,10 @@
     """,
     'author': "Nuxly",
     'category': 'Tools',
+    'website': "https://www.nuxly.com",
     'depends': ['auto_database_backup'],
+    'external_dependencies': {
+        'python': ['dropbox', 'pyncclient', 'boto3', 'nextcloud-api-wrapper','paramiko']},
     'data': [
         'views/db_backup_configure_view.xml',
     ],
