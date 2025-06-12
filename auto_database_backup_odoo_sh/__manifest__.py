@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 {
     'name': "Odoo.sh Backup to Cloud (Google Drive / OneDrive)",
-    'version': '16.0.1.1.0',
+    'version': '16.0.1.2.0',
     'summary': "Send Odoo.sh automatic backups to Google Drive / OneDrive",
     'description': """
       This module extends `auto_database_backup` to support additional cloud destinations for Odoo.sh:
