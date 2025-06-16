@@ -5,11 +5,13 @@ import json
 import requests
 import logging
 import os
+import math
 import tempfile
 import shutil
 import odoo.tools.osutil
 from odoo.exceptions import UserError
 _logger = logging.getLogger(__name__)
+CHUNK_SIZE = 62914560  # 60 MiB = 60 * 1024 * 1024
 
 class DbBackupConfigure(models.Model):
     _inherit = 'db.backup.configure'
@@ -18,7 +20,7 @@ class DbBackupConfigure(models.Model):
     selection_add=[
         ('odoo_sh_gdrive', 'Odoo.sh + Google Drive'),
         ('odoo_sh_onedrive', 'Odoo.sh + OneDrive')])
-    db_name = fields.Char(required=False)
+    db_name = fields.Char(required=False, default="database_backup")
     master_pwd = fields.Char(required=False)
 
     @api.constrains('db_name')
@@ -38,7 +40,7 @@ class DbBackupConfigure(models.Model):
         - Auto-removing old backups from cloud if enabled
         """
         super()._schedule_auto_backup() 
-        _logger.warning("========= SCHEDULE BACKUP CALL =========")
+        _logger.debug("========= SCHEDULE BACKUP CALL =========")
         records = self.search([])
         for rec in records:
             if rec.backup_destination not in ['odoo_sh_gdrive', 'odoo_sh_onedrive']:
@@ -98,66 +100,124 @@ class DbBackupConfigure(models.Model):
             raise UserError(f"The folder '{zip_path}' was not found.\nPlease make sure it exists and is correctly mounted.")
         entries = os.listdir(zip_path)
         _logger.debug("Entries found: %s", entries)
-        for f in entries:
-            _logger.debug("Checking entry: %s", f)
-            if 'daily' in f.lower():
+        for entry in entries:
+            _logger.debug("Checking entry: %s", entry)
+            if 'daily' not in entry.lower():
+                continue
+            abs_src = os.path.join(zip_path, entry)
+            if os.path.isfile(abs_src):
+                # Simple file to copy
+                abs_dst = os.path.join(temp_dir, entry)
+                shutil.copy2(abs_src, abs_dst)
                 found = True
-                abs_src = os.path.join(zip_path, f)
-                abs_dst = os.path.join(temp_dir, f)
-                if os.path.isdir(abs_src):
-                    _logger.warning("Copying directory: %s", abs_src)
-                    shutil.copytree(abs_src, abs_dst)
-                else:
-                    _logger.warning("Copying file: %s", abs_src)
-                    shutil.copy2(abs_src, abs_dst)
+            elif os.path.isdir(abs_src):
+                # Find the 'filestore' folder
+                for root, dirs, files in os.walk(abs_src):
+                    for d in dirs:
+                        if d == 'filestore':
+                            filestore_path = os.path.join(root, d)
+                            # Keep relative path from backup.daily (not just from abs_src)
+                            rel_filestore_path = os.path.relpath(filestore_path, zip_path)
+                            abs_dst = os.path.join(temp_dir, rel_filestore_path)
+
+                            os.makedirs(os.path.dirname(abs_dst), exist_ok=True)
+                            shutil.copytree(filestore_path, abs_dst)
+                            _logger.debug("Copying filestore: %s", rel_filestore_path)
+                            found = True
+                            break
+                    else:
+                        continue
+                    break
         if not found:
             _logger.debug("No file or folder with 'daily' found in %s", zip_path)
             shutil.rmtree(temp_dir, ignore_errors=True)
             return None, None
-        temp_zip = tempfile.NamedTemporaryFile(delete=False)
-        odoo.tools.osutil.zip_dir(temp_dir, temp_zip, include_dir=False)
-        temp_zip.seek(0)
-        filename = f"backup_{datetime.today().strftime('%Y-%m-%d')}.zip"
-        content = temp_zip.read()
-        temp_zip.close()
+        zip_filepath = f"/tmp/backup_{datetime.today().strftime('%Y-%m-%d')}.zip"
+        odoo.tools.osutil.zip_dir(temp_dir, zip_filepath, include_dir=False)
         shutil.rmtree(temp_dir, ignore_errors=True)
-        _logger.debug("Created zip archive: %s", filename)
-        return filename, content
+        _logger.debug("Created zip archive: %s", zip_filepath)
+        return os.path.basename(zip_filepath), zip_filepath
 
     # Upload a ZIP backup to Google Drive
-    def _send_to_gdrive(self, filename, content):
+    def _send_to_gdrive(self, filename, filepath):
         _logger.debug("Preparing to upload to Google Drive: %s", filename)
-        # Refresh token if expired
         if self.gdrive_token_validity <= fields.Datetime.now():
             _logger.debug("Google token expired, refreshing...")
             self.generate_gdrive_refresh_token()
-        headers = {"Authorization": f"Bearer {self.gdrive_access_token}"}
-        meta = {
+        headers = {
+            "Authorization": f"Bearer {self.gdrive_access_token}",
+            "Content-Type": "application/json; charset=UTF-8",
+            "X-Upload-Content-Type": "application/zip",}
+        metadata = {
             "name": filename,
             "parents": [self.google_drive_folder_key],}
-        files = {
-            'data': ('metadata', json.dumps(meta), 'application/json'),
-            'file': (filename, content, 'application/zip')}
-        res = requests.post(
-            "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart",
-            headers=headers, files=files
-        )
-        _logger.debug("Upload to Google Drive response code: %s", res.status_code)
-        _logger.debug("Response content: %s", res.text)
-        res.raise_for_status()
+        # 1. Create upload session "resumable" for large files
+        session = requests.post(
+            "https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable",
+            headers=headers,
+            json=metadata)
+        if session.status_code not in [200, 201]:
+            _logger.debug("Error initiating upload session: %s", session.text)
+            raise UserError(f"Erreur Google Drive: {session.text}")
+        upload_url = session.headers.get("Location")
+        if not upload_url:
+            raise UserError("Google Drive n'a pas retourné d'URL d'upload.")
+        # 2. Upload the ZIP file via PUT request
+        with open(filepath, 'rb') as f:
+            upload = requests.put(
+                upload_url,
+                headers={"Content-Type": "application/zip"},
+                data=f
+            )
+            _logger.debug("Upload to Google Drive response code: %s", upload.status_code)
+            _logger.debug("Upload response content: %s", upload.text)
+            upload.raise_for_status()
+        os.remove(filepath)
+        _logger.debug("Deleted temp zip: %s", filepath)
 
     # Upload a ZIP backup to OneDrive
-    def _send_to_onedrive(self, filename, content):
-        _logger.debug("Preparing to upload to OneDrive: %s", filename)
+    def _send_to_onedrive(self, filename, filepath):
+        self.ensure_one()
+        if not os.path.isfile(filepath):
+            raise UserError(_("Backup file not found: %s") % filepath)
+        file_size = os.path.getsize(filepath)
+        _logger.debug("Starting OneDrive upload for file '%s' (%s bytes)", filename, file_size)
         if self.onedrive_token_validity <= fields.Datetime.now():
-            _logger.debug("OneDrive token expired, refreshing...")
+            _logger.debug("Refreshing OneDrive token...")
             self.generate_onedrive_refresh_token()
-
         headers = {
-            'Authorization': f"Bearer {self.onedrive_access_token}",
-            'Content-Type': 'application/json'
-        }
-        upload_url = f"https://graph.microsoft.com/v1.0/me/drive/items/{self.onedrive_folder_key}:/{filename}:/content"
-        res = requests.put(upload_url, headers=headers, data=content)
-        _logger.debug("Upload to OneDrive response code: %s", res.status_code)
-        res.raise_for_status()
+            'Authorization': f'Bearer {self.onedrive_access_token}',
+            'Content-Type': 'application/json'}
+        session_url = f"https://graph.microsoft.com/v1.0/me/drive/items/{self.onedrive_folder_key}:/{filename}:/createUploadSession"
+        session_body = {
+            "item": {
+                "@microsoft.graph.conflictBehavior": "rename",
+                "name": filename}}
+        response = requests.post(session_url, headers=headers, json=session_body)
+        if response.status_code != 200:
+            _logger.error("Failed to create OneDrive session: %s", response.text)
+            raise UserError(_("Failed to create OneDrive upload session."))
+        upload_url = response.json().get('uploadUrl')
+        if not upload_url:
+            raise UserError(_("Upload URL not returned by OneDrive."))
+        _logger.debug("Upload session created. Starting chunked upload...")
+        # Chunked upload is required by OneDrive for files larger than 4 MB.
+        # This allows us to split large files (like backup ZIPs) into smaller parts,
+        # upload them sequentially, and avoid memory or timeout issues during transfer.
+        with open(filepath, 'rb') as f:
+            num_chunks = math.ceil(file_size / CHUNK_SIZE)
+            for i in range(num_chunks):
+                start = i * CHUNK_SIZE
+                end = min(start + CHUNK_SIZE, file_size) - 1
+                chunk_length = end - start + 1
+                f.seek(start)
+                chunk_data = f.read(chunk_length)
+                chunk_headers = {
+                    'Content-Length': str(chunk_length),
+                    'Content-Range': f"bytes {start}-{end}/{file_size}"}
+                _logger.debug("Uploading chunk %d/%d (%s-%s)...", i + 1, num_chunks, start, end)
+                res = requests.put(upload_url, headers=chunk_headers, data=chunk_data)
+                if res.status_code not in (200, 201, 202):
+                    _logger.error("Chunk upload failed (%s-%s): %s", start, end, res.text)
+                    raise UserError(_("Upload failed for chunk %s/%s.") % (i + 1, num_chunks))
+        _logger.debug("Upload to OneDrive completed for file '%s'", filename)
