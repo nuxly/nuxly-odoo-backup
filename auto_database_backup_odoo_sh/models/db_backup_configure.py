@@ -45,7 +45,14 @@ class DbBackupConfigure(models.Model):
         for rec in records:
             if rec.backup_destination not in ['odoo_sh_gdrive', 'odoo_sh_onedrive']:
                 continue
-            filename, content = rec._extract_daily_backup_zip()
+            try:
+                filename, content = rec._extract_daily_backup_zip()
+            except Exception as e:
+                _logger.warning("Erreur lors de l'extraction du backup daily pour '%s': %s", rec.name, str(e))
+                rec.generated_exception = f"Erreur extraction backup: {e}"
+                if rec.notify_user:
+                    self.env.ref('auto_database_backup.mail_template_data_db_backup_failed').send_mail(rec.id, force_send=True)
+                continue
             if not filename:
                 continue
             try:
