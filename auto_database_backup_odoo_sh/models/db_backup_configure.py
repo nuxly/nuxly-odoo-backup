@@ -42,108 +42,123 @@ class DbBackupConfigure(models.Model):
         super()._schedule_auto_backup() 
         _logger.debug("========= SCHEDULE BACKUP CALL =========")
         records = self.search([])
-        for rec in records:
-            if rec.backup_destination not in ['odoo_sh_gdrive', 'odoo_sh_onedrive']:
-                continue
-            try:
-                filename, content = rec._extract_daily_backup_zip()
-            except Exception as e:
-                _logger.warning("Erreur lors de l'extraction du backup daily pour '%s': %s", rec.name, str(e))
-                rec.generated_exception = f"Erreur extraction backup: {e}"
-                if rec.notify_user:
-                    self.env.ref('auto_database_backup.mail_template_data_db_backup_failed').send_mail(rec.id, force_send=True)
-                continue
-            if not filename:
-                continue
-            try:
-                # Google Drive backup Odoo.sh
-                if rec.backup_destination == 'odoo_sh_gdrive':
-                    rec._send_to_gdrive(filename, content)
-                    if rec.auto_remove:
-                        headers = {"Authorization": f"Bearer {rec.gdrive_access_token}"}
-                        query = f"parents = '{rec.google_drive_folder_key}'"
-                        files_req = requests.get(
-                            f"https://www.googleapis.com/drive/v3/files?q={query}",
-                            headers=headers)
-                        for file in files_req.json().get('files', []):
-                            meta = requests.get(
-                                f"https://www.googleapis.com/drive/v3/files/{file['id']}?fields=createdTime",
+        try:
+            for rec in records:
+                if rec.backup_destination not in ['odoo_sh_gdrive', 'odoo_sh_onedrive']:
+                    continue
+                try:
+                    filename, content = rec._extract_daily_backup_zip()
+                except Exception as e:
+                    _logger.warning("Error extracting daily backup for '%s': %s", rec.name, str(e))
+                    rec.generated_exception = f"Backup extraction error: {e}"
+                    if rec.notify_user:
+                        self.env.ref('auto_database_backup.mail_template_data_db_backup_failed').send_mail(rec.id, force_send=True)
+                    continue
+                if not filename:
+                    continue
+                try:
+                    # Google Drive backup Odoo.sh
+                    if rec.backup_destination == 'odoo_sh_gdrive':
+                        rec._send_to_gdrive(filename, content)
+                        if rec.auto_remove:
+                            headers = {"Authorization": f"Bearer {rec.gdrive_access_token}"}
+                            query = f"parents = '{rec.google_drive_folder_key}'"
+                            files_req = requests.get(
+                                f"https://www.googleapis.com/drive/v3/files?q={query}",
                                 headers=headers)
-                            created = meta.json().get('createdTime', '')[:19].replace('T', ' ')
-                            days = (fields.Datetime.now() - fields.datetime.strptime(created, '%Y-%m-%d %H:%M:%S')).days
-                            if days >= rec.days_to_remove:
-                                requests.delete(f"https://www.googleapis.com/drive/v3/files/{file['id']}", headers=headers)
-                # Onedrive Backup Odoo.sh
-                elif rec.backup_destination == 'odoo_sh_onedrive':
-                    rec._send_to_onedrive(filename, content)
-                    if rec.auto_remove:
-                        headers = {'Authorization': f"Bearer {rec.onedrive_access_token}"}
-                        list_url = f"https://graph.microsoft.com/v1.0/me/drive/items/{rec.onedrive_folder_key}/children"
-                        response = requests.get(list_url, headers=headers)
-                        for file in response.json().get('value', []):
-                            created = file['createdDateTime'][:19].replace('T', ' ')
-                            days = (fields.Datetime.now() - fields.datetime.strptime(created, '%Y-%m-%d %H:%M:%S')).days
-                            if days >= rec.days_to_remove:
-                                delete_url = f"https://graph.microsoft.com/v1.0/me/drive/items/{file['id']}"
-                                requests.delete(delete_url, headers=headers)
-                if rec.notify_user:
-                        self.env.ref('auto_database_backup.mail_template_data_db_backup_successful').send_mail(rec.id, force_send=True)
-            except Exception as e:
-                rec.generated_exception = str(e)
-                _logger.exception("ODoo.sh Backup failed: %s", e)
-                if rec.notify_user:
-                    self.env.ref('auto_database_backup.mail_template_data_db_backup_failed').send_mail(rec.id, force_send=True)
+                            for file in files_req.json().get('files', []):
+                                meta = requests.get(
+                                    f"https://www.googleapis.com/drive/v3/files/{file['id']}?fields=createdTime",
+                                    headers=headers)
+                                created = meta.json().get('createdTime', '')[:19].replace('T', ' ')
+                                days = (fields.Datetime.now() - fields.datetime.strptime(created, '%Y-%m-%d %H:%M:%S')).days
+                                if days >= rec.days_to_remove:
+                                    requests.delete(f"https://www.googleapis.com/drive/v3/files/{file['id']}", headers=headers)
+                    # Onedrive Backup Odoo.sh
+                    elif rec.backup_destination == 'odoo_sh_onedrive':
+                        rec._send_to_onedrive(filename, content)
+                        if rec.auto_remove:
+                            headers = {'Authorization': f"Bearer {rec.onedrive_access_token}"}
+                            list_url = f"https://graph.microsoft.com/v1.0/me/drive/items/{rec.onedrive_folder_key}/children"
+                            response = requests.get(list_url, headers=headers)
+                            for file in response.json().get('value', []):
+                                created = file['createdDateTime'][:19].replace('T', ' ')
+                                days = (fields.Datetime.now() - fields.datetime.strptime(created, '%Y-%m-%d %H:%M:%S')).days
+                                if days >= rec.days_to_remove:
+                                    delete_url = f"https://graph.microsoft.com/v1.0/me/drive/items/{file['id']}"
+                                    requests.delete(delete_url, headers=headers)
+                    if rec.notify_user:
+                            self.env.ref('auto_database_backup.mail_template_data_db_backup_successful').send_mail(rec.id, force_send=True)
+                except Exception as e:
+                    rec.generated_exception = str(e)
+                    _logger.exception("ODoo.sh Backup failed: %s", e)
+                    if rec.notify_user:
+                        self.env.ref('auto_database_backup.mail_template_data_db_backup_failed').send_mail(rec.id, force_send=True)
+        finally:
+            # Clean /tmp folder after all backups (even if failed)
+            os.system("rm -rf /tmp/* || true")
+            _logger.debug("Temporary folder /tmp cleaned up after backup process.")
 
     def _extract_daily_backup_zip(self):
         """
-        Scan folder /backup.daily in oOdoo.sh and zip any folder or file containing 'daily'
+        Scan folder /backup.daily in Odoo.sh and zip any folder or file containing 'daily'
         into a temporary ZIP archive for cloud upload.
         """
         zip_path = "backup.daily"
         temp_dir = tempfile.mkdtemp()
+
+        # Disk space check before building the zip
+        stat = shutil.disk_usage("/tmp")
+        if stat.free < 2 * 1024 * 1024 * 1024:  # minimum 2GB free (configurable)
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            raise UserError(
+                _("Not enough disk space to create the backup (only %.2f GB free)") 
+                % (stat.free / (1024 ** 3)))
+
         found = False
         _logger.debug("Scanning directory: %s", zip_path)
-        if not os.path.isdir(zip_path):
-            raise UserError(f"The folder '{zip_path}' was not found.\nPlease make sure it exists and is correctly mounted.")
-        entries = os.listdir(zip_path)
-        _logger.debug("Entries found: %s", entries)
-        for entry in entries:
-            _logger.debug("Checking entry: %s", entry)
-            if 'daily' not in entry.lower():
-                continue
-            abs_src = os.path.join(zip_path, entry)
-            if os.path.isfile(abs_src):
-                # Simple file to copy
-                abs_dst = os.path.join(temp_dir, entry)
-                shutil.copy2(abs_src, abs_dst)
-                found = True
-            elif os.path.isdir(abs_src):
-                # Find the 'filestore' folder
-                for root, dirs, files in os.walk(abs_src):
-                    for d in dirs:
-                        if d == 'filestore':
-                            filestore_path = os.path.join(root, d)
-                            # Keep relative path from backup.daily (not just from abs_src)
-                            rel_filestore_path = os.path.relpath(filestore_path, zip_path)
-                            abs_dst = os.path.join(temp_dir, rel_filestore_path)
+        try:
+            if not os.path.isdir(zip_path):
+                raise UserError(f"The folder '{zip_path}' was not found.\nPlease make sure it exists and is correctly mounted.")
+            entries = os.listdir(zip_path)
+            _logger.debug("Entries found: %s", entries)
+            for entry in entries:
+                _logger.debug("Checking entry: %s", entry)
+                if 'daily' not in entry.lower():
+                    continue
+                abs_src = os.path.join(zip_path, entry)
+                if os.path.isfile(abs_src):
+                    # Simple file to copy
+                    abs_dst = os.path.join(temp_dir, entry)
+                    shutil.copy2(abs_src, abs_dst)
+                    found = True
+                elif os.path.isdir(abs_src):
+                    # Find the 'filestore' folder
+                    for root, dirs, files in os.walk(abs_src):
+                        for d in dirs:
+                            if d == 'filestore':
+                                filestore_path = os.path.join(root, d)
+                                # Keep relative path from backup.daily (not just from abs_src)
+                                rel_filestore_path = os.path.relpath(filestore_path, zip_path)
+                                abs_dst = os.path.join(temp_dir, rel_filestore_path)
 
-                            os.makedirs(os.path.dirname(abs_dst), exist_ok=True)
-                            shutil.copytree(filestore_path, abs_dst)
-                            _logger.debug("Copying filestore: %s", rel_filestore_path)
-                            found = True
-                            break
-                    else:
-                        continue
-                    break
-        if not found:
-            _logger.debug("No file or folder with 'daily' found in %s", zip_path)
+                                os.makedirs(os.path.dirname(abs_dst), exist_ok=True)
+                                shutil.copytree(filestore_path, abs_dst)
+                                _logger.debug("Copying filestore: %s", rel_filestore_path)
+                                found = True
+                                break
+                        else:
+                            continue
+                        break
+            if not found:
+                _logger.debug("No file or folder with 'daily' found in %s", zip_path)
+                return None, None
+            zip_filepath = f"/tmp/backup_{datetime.today().strftime('%Y-%m-%d')}.zip"
+            odoo.tools.osutil.zip_dir(temp_dir, zip_filepath, include_dir=False)
+            _logger.debug("Created zip archive: %s", zip_filepath)
+            return os.path.basename(zip_filepath), zip_filepath
+        finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
-            return None, None
-        zip_filepath = f"/tmp/backup_{datetime.today().strftime('%Y-%m-%d')}.zip"
-        odoo.tools.osutil.zip_dir(temp_dir, zip_filepath, include_dir=False)
-        shutil.rmtree(temp_dir, ignore_errors=True)
-        _logger.debug("Created zip archive: %s", zip_filepath)
-        return os.path.basename(zip_filepath), zip_filepath
 
     # Upload a ZIP backup to Google Drive
     def _send_to_gdrive(self, filename, filepath):
@@ -165,10 +180,10 @@ class DbBackupConfigure(models.Model):
             json=metadata)
         if session.status_code not in [200, 201]:
             _logger.debug("Error initiating upload session: %s", session.text)
-            raise UserError(f"Erreur Google Drive: {session.text}")
+            raise UserError(f"Google Drive error: {session.text}")
         upload_url = session.headers.get("Location")
         if not upload_url:
-            raise UserError("Google Drive n'a pas retourné d'URL d'upload.")
+            raise UserError(_("Google Drive did not return an upload URL."))
         # 2. Upload the ZIP file via PUT request
         with open(filepath, 'rb') as f:
             upload = requests.put(
