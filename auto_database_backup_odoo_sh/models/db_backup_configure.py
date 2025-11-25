@@ -46,6 +46,12 @@ class DbBackupConfigure(models.Model):
             for rec in records:
                 if rec.backup_destination not in ['odoo_sh_gdrive', 'odoo_sh_onedrive']:
                     continue
+                
+                # ========= PRE-CHECK DISK SPACE =========
+                if not rec._check_disk_space_before_backup():
+                    continue
+                # ========================================
+
                 try:
                     filename, content = rec._extract_daily_backup_zip()
                 except Exception as e:
@@ -88,7 +94,7 @@ class DbBackupConfigure(models.Model):
                                     delete_url = f"https://graph.microsoft.com/v1.0/me/drive/items/{file['id']}"
                                     requests.delete(delete_url, headers=headers)
                     if rec.notify_user:
-                            self.env.ref('auto_database_backup.mail_template_data_db_backup_successful').send_mail(rec.id, force_send=True)
+                        self.env.ref('auto_database_backup.mail_template_data_db_backup_successful').send_mail(rec.id, force_send=True)
                 except Exception as e:
                     rec.generated_exception = str(e)
                     _logger.exception("ODoo.sh Backup failed: %s", e)
@@ -106,14 +112,6 @@ class DbBackupConfigure(models.Model):
         """
         zip_path = "backup.daily"
         temp_dir = tempfile.mkdtemp()
-
-        # Disk space check before building the zip
-        stat = shutil.disk_usage("/tmp")
-        if stat.free < 2 * 1024 * 1024 * 1024:  # minimum 2GB free (configurable)
-            shutil.rmtree(temp_dir, ignore_errors=True)
-            raise UserError(
-                _("Not enough disk space to create the backup (only %.2f GB free)") 
-                % (stat.free / (1024 ** 3)))
 
         found = False
         _logger.debug("Scanning directory: %s", zip_path)
@@ -243,3 +241,91 @@ class DbBackupConfigure(models.Model):
                     _logger.error("Chunk upload failed (%s-%s): %s", start, end, res.text)
                     raise UserError(_("Upload failed for chunk %s/%s.") % (i + 1, num_chunks))
         _logger.debug("Upload to OneDrive completed for file '%s'", filename)
+
+
+
+    def _estimate_daily_backup_size(self):
+        """
+        Estimate the total size based STRICTLY on what _extract_daily_backup_zip()
+        will copy:
+        - Any file containing 'daily' in backup.daily
+        - The 'filestore' folder inside any 'daily' directory
+        """
+        base_path = "backup.daily"
+        total_size = 0
+        _logger.debug("Estimating backup size from '%s'...", base_path)
+        if not os.path.isdir(base_path):
+            raise UserError(_("Backup folder '%s' not found.") % base_path)
+        entries = os.listdir(base_path)
+        _logger.debug("Entries found: %s", entries)
+        for entry in entries:
+            if 'daily' not in entry.lower():
+                continue
+            abs_src = os.path.join(base_path, entry)
+            # === CASE 1: Simple file ===
+            if os.path.isfile(abs_src):
+                size = os.path.getsize(abs_src)
+                total_size += size
+                _logger.debug("Including daily file: %s (%.2f MB)", abs_src, size / (1024**2))
+            # === CASE 2: Directory ===
+            elif os.path.isdir(abs_src):
+                _logger.debug("Scanning directory for filestore: %s", abs_src)
+                for root, dirs, files in os.walk(abs_src):
+
+                    # Look only for 'filestore'
+                    for d in dirs:
+                        if d == 'filestore':
+                            filestore_path = os.path.join(root, d)
+                            _logger.debug("Found filestore: %s", filestore_path)
+
+                            for r, dd, ff in os.walk(filestore_path):
+                                for f in ff:
+                                    fp = os.path.join(r, f)
+                                    size = os.path.getsize(fp)
+                                    total_size += size
+                            break  # stop scanning inside this directory
+        _logger.debug("Estimated total backup size: %.2f MB (%.2f GB)", total_size / (1024**2), total_size / (1024**3))
+        return total_size
+
+    def _check_disk_space_before_backup(self):
+        """
+        Checks estimated backup size + required free space BEFORE generating ZIP.
+        Returns True if OK, False if backup must be skipped.
+        """
+        try:
+            estimated = self._estimate_daily_backup_size()
+            stat = shutil.disk_usage("/tmp")
+            # --- SIMULATION: force fake free space ---
+            # free_space = 100 * 1024 * 1024  # 100MB = small for test
+            # ---------------------------------------
+            free_space = stat.free
+            # Convert byte → GB
+            estimated_gb = estimated / (1024**3)
+            # Round required space to next full GB
+            required_gb = math.ceil(estimated_gb)
+            required = required_gb * (1024**3)
+            _logger.debug("Disk space pre-check — estimated=%.2fGB free=%.2fGB required=%dGB", estimated_gb, free_space / (1024**3), required_gb)
+            if free_space < required:
+                missing = required - free_space
+                msg = _(
+                    "Insufficient disk space to generate the backup.\n\n"
+                    "Estimated backup size: %.2f GB\n"
+                    "Available space: %.2f GB\n"
+                    "Required space: %d GB\n\n"
+                    "Please free at least %.2f GB.") % (
+                    estimated_gb,
+                    free_space / (1024**3),
+                    required_gb,
+                    missing / (1024**3),)
+                _logger.error("Backup aborted for %s. Missing %.2fGB.",self.name, missing / (1024**3))
+                self.generated_exception = msg
+                if self.notify_user:
+                    self.env.ref('auto_database_backup.mail_template_data_db_backup_failed').send_mail(self.id, force_send=True)
+                return False
+            return True
+        except Exception as e:
+            _logger.exception("Error during disk space pre-check: %s", e)
+            self.generated_exception = str(e)
+            if self.notify_user:
+                self.env.ref('auto_database_backup.mail_template_data_db_backup_failed').send_mail(self.id, force_send=True)
+            return False
