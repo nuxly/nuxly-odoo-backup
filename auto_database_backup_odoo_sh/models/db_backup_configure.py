@@ -295,9 +295,6 @@ class DbBackupConfigure(models.Model):
         try:
             estimated = self._estimate_daily_backup_size()
             stat = shutil.disk_usage("/tmp")
-            # --- SIMULATION: force fake free space ---
-            # free_space = 100 * 1024 * 1024  # 100MB = small for test
-            # ---------------------------------------
             free_space = stat.free
             # Convert byte → GB
             estimated_gb = estimated / (1024**3)
@@ -307,16 +304,12 @@ class DbBackupConfigure(models.Model):
             _logger.debug("Disk space pre-check — estimated=%.2fGB free=%.2fGB required=%dGB", estimated_gb, free_space / (1024**3), required_gb)
             if free_space < required:
                 missing = required - free_space
-                msg = _(
-                    "Insufficient disk space to generate the backup.\n\n"
-                    "Estimated backup size: %.2f GB\n"
-                    "Available space: %.2f GB\n"
-                    "Required space: %d GB\n\n"
-                    "Please free at least %.2f GB.") % (
-                    estimated_gb,
-                    free_space / (1024**3),
-                    required_gb,
-                    missing / (1024**3),)
+                msg = (
+                    "Insufficient disk space to generate the backup: "
+                    "Estimated backup size: %.2f GB / "
+                    "Available space: %.2f GB. "
+                    "Backup generation required %d GB."
+                ) % (estimated_gb, free_space / (1024**3), required_gb)
                 _logger.error("Backup aborted for %s. Missing %.2fGB.",self.name, missing / (1024**3))
                 self.generated_exception = msg
                 if self.notify_user:
