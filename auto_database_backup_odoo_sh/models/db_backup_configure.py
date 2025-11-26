@@ -10,6 +10,7 @@ import tempfile
 import shutil
 import odoo.tools.osutil
 from odoo.exceptions import UserError
+import zipfile
 _logger = logging.getLogger(__name__)
 CHUNK_SIZE = 62914560  # 60 MiB = 60 * 1024 * 1024
 
@@ -108,55 +109,50 @@ class DbBackupConfigure(models.Model):
     def _extract_daily_backup_zip(self):
         """
         Scan folder /backup.daily in Odoo.sh and zip any folder or file containing 'daily'
-        into a temporary ZIP archive for cloud upload.
+        into a ZIP archive for cloud upload.
         """
-        zip_path = "backup.daily"
-        temp_dir = tempfile.mkdtemp()
-
+        base_path = "backup.daily"
+        today = datetime.today().strftime('%Y-%m-%d')
+        zip_filepath = f"/tmp/backup_{today}.zip"
+        _logger.debug("Scanning directory: %s", base_path)
+        if not os.path.isdir(base_path):
+            raise UserError(_("The folder '%s' was not found.") % base_path)
+        entries = os.listdir(base_path)
+        _logger.debug("Entries found: %s", entries)
         found = False
-        _logger.debug("Scanning directory: %s", zip_path)
-        try:
-            if not os.path.isdir(zip_path):
-                raise UserError(f"The folder '{zip_path}' was not found.\nPlease make sure it exists and is correctly mounted.")
-            entries = os.listdir(zip_path)
-            _logger.debug("Entries found: %s", entries)
+        with zipfile.ZipFile(zip_filepath, "w", zipfile.ZIP_DEFLATED) as z:
             for entry in entries:
-                _logger.debug("Checking entry: %s", entry)
-                if 'daily' not in entry.lower():
+                if "daily" not in entry.lower():
                     continue
-                abs_src = os.path.join(zip_path, entry)
-                if os.path.isfile(abs_src):
-                    # Simple file to copy
-                    abs_dst = os.path.join(temp_dir, entry)
-                    shutil.copy2(abs_src, abs_dst)
-                    found = True
-                elif os.path.isdir(abs_src):
-                    # Find the 'filestore' folder
-                    for root, dirs, files in os.walk(abs_src):
-                        for d in dirs:
-                            if d == 'filestore':
-                                filestore_path = os.path.join(root, d)
-                                # Keep relative path from backup.daily (not just from abs_src)
-                                rel_filestore_path = os.path.relpath(filestore_path, zip_path)
-                                abs_dst = os.path.join(temp_dir, rel_filestore_path)
+                abs_daily = os.path.join(base_path, entry)
+                if not os.path.isdir(abs_daily):
+                    continue
+                # Search ONLY for filestore
+                for root, dirs, files in os.walk(abs_daily):
+                    if "filestore" not in dirs:
+                        continue
+                    filestore_path = os.path.join(root, "filestore")
+                    _logger.debug("Found filestore: %s", filestore_path)
 
-                                os.makedirs(os.path.dirname(abs_dst), exist_ok=True)
-                                shutil.copytree(filestore_path, abs_dst)
-                                _logger.debug("Copying filestore: %s", rel_filestore_path)
-                                found = True
-                                break
-                        else:
-                            continue
-                        break
-            if not found:
-                _logger.debug("No file or folder with 'daily' found in %s", zip_path)
-                return None, None
-            zip_filepath = f"/tmp/backup_{datetime.today().strftime('%Y-%m-%d')}.zip"
-            odoo.tools.osutil.zip_dir(temp_dir, zip_filepath, include_dir=False)
-            _logger.debug("Created zip archive: %s", zip_filepath)
-            return os.path.basename(zip_filepath), zip_filepath
-        finally:
-            shutil.rmtree(temp_dir, ignore_errors=True)
+                    # Add all files inside the filestore
+                    for r, dd, ff in os.walk(filestore_path):
+                        for f in ff:
+                            abs_file = os.path.join(r, f)
+                            # Path inside zip (keep the daily folder name)
+                            rel_file = os.path.relpath(abs_file, base_path)
+                            z.write(abs_file, arcname=rel_file)
+                    found = True
+                    break  # stop scanning after filestore found
+        if not found:
+            _logger.debug("No filestore found in any 'daily' folder.")
+            return None, None
+        _logger.debug("Created zip archive: %s", zip_filepath)
+        # Log final size
+        final_size = os.path.getsize(zip_filepath)
+        _logger.debug("Final ZIP size: %.2f MB (%.2f GB)",
+                    final_size / (1024**2),
+                    final_size / (1024**3))
+        return os.path.basename(zip_filepath), zip_filepath
 
     # Upload a ZIP backup to Google Drive
     def _send_to_gdrive(self, filename, filepath):
