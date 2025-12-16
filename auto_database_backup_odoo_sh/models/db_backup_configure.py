@@ -204,7 +204,16 @@ class DbBackupConfigure(models.Model):
         headers = {
             'Authorization': f'Bearer {self.onedrive_access_token}',
             'Content-Type': 'application/json'}
-        session_url = f"https://graph.microsoft.com/v1.0/me/drive/items/{self.onedrive_folder_key}:/{filename}:/createUploadSession"
+        _logger.warning(
+            "ONEDRIVE DEBUG | access_token=%s | refresh_token=%s | validity=%s | now=%s",
+            self.onedrive_access_token[:10] + "..." if self.onedrive_access_token else None,
+            bool(self.onedrive_refresh_token),
+            self.onedrive_token_validity,
+            fields.Datetime.now())
+        # session_url = f"https://graph.microsoft.com/v1.0/me/drive/items/{self.onedrive_folder_key}:/{filename}:/createUploadSession"
+        session_url = (
+            "https://graph.microsoft.com/v1.0/me/drive/root:"
+            f"/{self.onedrive_folder_key}/{filename}:/createUploadSession")
         session_body = {
             "item": {
                 "@microsoft.graph.conflictBehavior": "rename",
