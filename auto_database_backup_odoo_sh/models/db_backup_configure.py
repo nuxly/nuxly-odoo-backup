@@ -370,33 +370,18 @@ class DbBackupConfigure(models.Model):
         records = self.search([
             ('backup_destination', 'in', ['odoo_sh_gdrive', 'odoo_sh_onedrive'])
         ])
+        all_ok = True
         for rec in records:
             try:
                 if rec.backup_destination == 'odoo_sh_gdrive':
                     rec._send_to_gdrive(part_name, part_path)
-
-                if rec.backup_destination == 'odoo_sh_onedrive':
+                elif rec.backup_destination == 'odoo_sh_onedrive':
                     rec._send_to_onedrive(part_name, part_path)
-
-                os.remove(part_path)
-                _logger.info("[BACKUP] Part uploaded & deleted %s", part_name)
-
-                remaining = [f for f in os.listdir(local_dir) if "part_" in f]
-                if not remaining:
-                    _logger.info("[BACKUP] All parts uploaded for %s", today)
-
-                    try:
-                        os.rmdir(local_dir)
-                        _logger.info("[BACKUP] Temp folder cleaned %s", local_dir)
-                    except OSError:
-                        _logger.debug("[BACKUP] Temp folder not empty or already removed")
-
-                    if rec.notify_user:
-                        self.env.ref(
-                            'auto_database_backup.mail_template_data_db_backup_successful'
-                        ).send_mail(rec.id, force_send=True)
             except Exception as e:
-                _logger.exception("[BACKUP] Upload failed %s", part_name)
+                _logger.exception(
+                    "[BACKUP] Upload failed for %s on %s",
+                    part_name, rec.backup_destination
+                )
                 rec.generated_exception = str(e)
 
                 if rec.notify_user:
@@ -404,7 +389,28 @@ class DbBackupConfigure(models.Model):
                         'auto_database_backup.mail_template_data_db_backup_failed'
                     ).send_mail(rec.id, force_send=True)
 
+                all_ok = False
                 break
+
+        if not all_ok:
+            return
+        os.remove(part_path)
+        _logger.info("[BACKUP] Part uploaded for all destinations & deleted %s", part_name)
+
+        remaining = [f for f in os.listdir(local_dir) if "part_" in f]
+        if not remaining:
+            _logger.info("[BACKUP] All parts uploaded for %s", today)
+            try:
+                os.rmdir(local_dir)
+                _logger.info("[BACKUP] Temp folder cleaned %s", local_dir)
+            except OSError:
+                _logger.debug("[BACKUP] Temp folder not empty or already removed")
+
+            for rec in records:
+                if rec.notify_user:
+                    self.env.ref(
+                        'auto_database_backup.mail_template_data_db_backup_successful'
+                    ).send_mail(rec.id, force_send=True)
 
     def _get_gdrive_daily_parent_id(self, date_str):
         """Return Google Drive folder ID for given date under configured parent."""
