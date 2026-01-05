@@ -20,6 +20,7 @@
         'python': ['dropbox', 'pyncclient', 'boto3', 'nextcloud-api-wrapper','paramiko']},
     'data': [
         'views/db_backup_configure_view.xml',
+        'data/ir_cron_data.xml',
     ],
     'images': ['static/description/banner.gif'],
     'installable': True,

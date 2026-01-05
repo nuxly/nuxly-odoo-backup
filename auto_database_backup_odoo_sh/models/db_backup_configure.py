@@ -13,6 +13,8 @@ from odoo.exceptions import UserError
 import zipfile
 _logger = logging.getLogger(__name__)
 CHUNK_SIZE = 62914560  # 60 MiB = 60 * 1024 * 1024
+SPLIT_SIZE_MB = 200
+BACKUP_PARTS_DIR = "/tmp/backup_parts"
 
 class DbBackupConfigure(models.Model):
     _inherit = 'db.backup.configure'
@@ -43,68 +45,36 @@ class DbBackupConfigure(models.Model):
         super()._schedule_auto_backup() 
         _logger.debug("========= SCHEDULE BACKUP CALL =========")
         records = self.search([])
-        try:
-            for rec in records:
-                if rec.backup_destination not in ['odoo_sh_gdrive', 'odoo_sh_onedrive']:
-                    continue
-                
-                # ========= PRE-CHECK DISK SPACE =========
-                if not rec._check_disk_space_before_backup():
-                    continue
-                # ========================================
+        for rec in records:
+            if rec.backup_destination not in ['odoo_sh_gdrive', 'odoo_sh_onedrive']:
+                continue
+            
+            # ========= PRE-CHECK DISK SPACE =========
+            if not rec._check_disk_space_before_backup():
+                continue
+            # ========================================
+            try:
+                # Odoo.sh: only extract + split
+                rec.extract_and_split_backup()
+                _logger.info(
+                    "Backup extract + split finished for %s. Upload deferred to cron.",
+                    rec.name
+                )
+            except Exception as e:
+                _logger.exception(
+                    "Backup extract + split failed for %s", rec.name
+                )
+                rec.generated_exception = str(e)
+                if rec.notify_user:
+                    self.env.ref(
+                        'auto_database_backup.mail_template_data_db_backup_failed'
+                    ).send_mail(rec.id, force_send=True)
 
-                try:
-                    filename, content = rec._extract_daily_backup_zip()
-                except Exception as e:
-                    _logger.warning("Error extracting daily backup for '%s': %s", rec.name, str(e))
-                    rec.generated_exception = f"Backup extraction error: {e}"
-                    if rec.notify_user:
-                        self.env.ref('auto_database_backup.mail_template_data_db_backup_failed').send_mail(rec.id, force_send=True)
-                    continue
-                if not filename:
-                    continue
-                try:
-                    # Google Drive backup Odoo.sh
-                    if rec.backup_destination == 'odoo_sh_gdrive':
-                        rec._send_to_gdrive(filename, content)
-                        if rec.auto_remove:
-                            headers = {"Authorization": f"Bearer {rec.gdrive_access_token}"}
-                            query = f"parents = '{rec.google_drive_folder_key}'"
-                            files_req = requests.get(
-                                f"https://www.googleapis.com/drive/v3/files?q={query}",
-                                headers=headers)
-                            for file in files_req.json().get('files', []):
-                                meta = requests.get(
-                                    f"https://www.googleapis.com/drive/v3/files/{file['id']}?fields=createdTime",
-                                    headers=headers)
-                                created = meta.json().get('createdTime', '')[:19].replace('T', ' ')
-                                days = (fields.Datetime.now() - fields.datetime.strptime(created, '%Y-%m-%d %H:%M:%S')).days
-                                if days >= rec.days_to_remove:
-                                    requests.delete(f"https://www.googleapis.com/drive/v3/files/{file['id']}", headers=headers)
-                    # Onedrive Backup Odoo.sh
-                    elif rec.backup_destination == 'odoo_sh_onedrive':
-                        rec._send_to_onedrive(filename, content)
-                        if rec.auto_remove:
-                            headers = {'Authorization': f"Bearer {rec.onedrive_access_token}"}
-                            list_url = f"https://graph.microsoft.com/v1.0/me/drive/items/{rec.onedrive_folder_key}/children"
-                            response = requests.get(list_url, headers=headers)
-                            for file in response.json().get('value', []):
-                                created = file['createdDateTime'][:19].replace('T', ' ')
-                                days = (fields.Datetime.now() - fields.datetime.strptime(created, '%Y-%m-%d %H:%M:%S')).days
-                                if days >= rec.days_to_remove:
-                                    delete_url = f"https://graph.microsoft.com/v1.0/me/drive/items/{file['id']}"
-                                    requests.delete(delete_url, headers=headers)
-                    if rec.notify_user:
-                        self.env.ref('auto_database_backup.mail_template_data_db_backup_successful').send_mail(rec.id, force_send=True)
-                except Exception as e:
-                    rec.generated_exception = str(e)
-                    _logger.exception("ODoo.sh Backup failed: %s", e)
-                    if rec.notify_user:
-                        self.env.ref('auto_database_backup.mail_template_data_db_backup_failed').send_mail(rec.id, force_send=True)
-        finally:
-            # Clean /tmp folder after all backups (even if failed)
-            os.system("rm -rf /tmp/* || true")
-            _logger.debug("Temporary folder /tmp cleaned up after backup process.")
+            # IMPORTANT:
+            # Upload + auto_remove + success mail
+            # are handled by cron_upload_backup_part
+            continue
+
 
     def _extract_daily_backup_zip(self):
         """
@@ -327,3 +297,108 @@ class DbBackupConfigure(models.Model):
             if self.notify_user:
                 self.env.ref('auto_database_backup.mail_template_data_db_backup_failed').send_mail(self.id, force_send=True)
             return False
+
+    def extract_and_split_backup(self):
+        """
+        Build ZIP using existing extract logic,
+        then split it into parts and delete the ZIP.
+        NO upload here.
+        """
+        self.ensure_one()
+        today = fields.Date.today().strftime('%Y-%m-%d')
+        local_dir = os.path.join(BACKUP_PARTS_DIR, today)
+        os.makedirs(local_dir, exist_ok=True)
+        _logger.info(
+            "=== BACKUP EXTRACT + SPLIT START | %s | %s ===",
+            today,
+            self.name)
+        try:
+            filename, zip_path = self._extract_daily_backup_zip()
+            if not filename or not zip_path:
+                _logger.warning(
+                    "No ZIP generated for %s, nothing to split.", self.name
+                )
+                return
+            # filename = backup_YYYY-MM-DD.zip
+            base_name = filename.replace(".zip", "")
+            split_prefix = os.path.join(local_dir, f"{base_name}_part_")
+            cmd = f"split -b {SPLIT_SIZE_MB}M {zip_path} {split_prefix}"
+            _logger.info(
+                "Splitting ZIP for %s with command: %s",
+                self.name,
+                cmd)
+            os.system(cmd)
+            # rename parts to *.zip
+            for part in os.listdir(local_dir):
+                if part.startswith(f"{base_name}_part_") and not part.endswith(".zip"):
+                    os.rename(
+                        os.path.join(local_dir, part),
+                        os.path.join(local_dir, f"{part}.zip"))
+            os.remove(zip_path)
+            _logger.info(
+                "ZIP successfully split and removed for %s", self.name
+            )
+        except Exception as e:
+            _logger.exception(
+                "Extract + split failed for %s", self.name
+            )
+            self.generated_exception = str(e)
+            raise
+
+    def cron_upload_backup_part(self):
+        """
+        Cron every 5 minutes:
+        - Upload ONE backup part
+        - Send success mail ONLY when last part is sent
+        """
+        today = fields.Date.today().strftime('%Y-%m-%d')
+        local_dir = os.path.join(BACKUP_PARTS_DIR, today)
+        _logger.debug("[BACKUP] Cron upload check | %s", today)
+        if not os.path.isdir(local_dir):
+            _logger.debug("[BACKUP] No local dir %s", local_dir)
+            return
+        parts = sorted(f for f in os.listdir(local_dir) if "part_" in f)
+        if not parts:
+            _logger.debug("[BACKUP] No remaining parts for %s", today)
+            return
+        part_name = parts[0]
+        part_path = os.path.join(local_dir, part_name)
+        _logger.info("[BACKUP] Upload part %s", part_name)
+        records = self.search([
+            ('backup_destination', 'in', ['odoo_sh_gdrive', 'odoo_sh_onedrive'])
+        ])
+        for rec in records:
+            try:
+                if rec.backup_destination == 'odoo_sh_gdrive':
+                    rec._send_to_gdrive(part_name, part_path)
+
+                if rec.backup_destination == 'odoo_sh_onedrive':
+                    rec._send_to_onedrive(part_name, part_path)
+
+                os.remove(part_path)
+                _logger.info("[BACKUP] Part uploaded & deleted %s", part_name)
+
+                remaining = [f for f in os.listdir(local_dir) if "part_" in f]
+                if not remaining:
+                    _logger.info("[BACKUP] All parts uploaded for %s", today)
+
+                    try:
+                        os.rmdir(local_dir)
+                        _logger.info("[BACKUP] Temp folder cleaned %s", local_dir)
+                    except OSError:
+                        _logger.debug("[BACKUP] Temp folder not empty or already removed")
+
+                    if rec.notify_user:
+                        self.env.ref(
+                            'auto_database_backup.mail_template_data_db_backup_successful'
+                        ).send_mail(rec.id, force_send=True)
+            except Exception as e:
+                _logger.exception("[BACKUP] Upload failed %s", part_name)
+                rec.generated_exception = str(e)
+
+                if rec.notify_user:
+                    self.env.ref(
+                        'auto_database_backup.mail_template_data_db_backup_failed'
+                    ).send_mail(rec.id, force_send=True)
+
+                break
