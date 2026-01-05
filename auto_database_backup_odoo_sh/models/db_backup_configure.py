@@ -134,9 +134,12 @@ class DbBackupConfigure(models.Model):
             "Authorization": f"Bearer {self.gdrive_access_token}",
             "Content-Type": "application/json; charset=UTF-8",
             "X-Upload-Content-Type": "application/zip",}
+        today = fields.Date.today().strftime('%Y-%m-%d')
+        parent_id = self._get_gdrive_daily_parent_id(today)
         metadata = {
             "name": filename,
-            "parents": [self.google_drive_folder_key],}
+            "parents": [parent_id],
+        }
         # 1. Create upload session "resumable" for large files
         session = requests.post(
             "https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable",
@@ -158,7 +161,7 @@ class DbBackupConfigure(models.Model):
             _logger.debug("Upload to Google Drive response code: %s", upload.status_code)
             _logger.debug("Upload response content: %s", upload.text)
             upload.raise_for_status()
-        os.remove(filepath)
+        # os.remove(filepath)
         _logger.debug("Deleted temp zip: %s", filepath)
 
     # Upload a ZIP backup to OneDrive
@@ -181,9 +184,10 @@ class DbBackupConfigure(models.Model):
             self.onedrive_token_validity,
             fields.Datetime.now())
         # session_url = f"https://graph.microsoft.com/v1.0/me/drive/items/{self.onedrive_folder_key}:/{filename}:/createUploadSession"
+        today = fields.Date.today().strftime('%Y-%m-%d')
         session_url = (
             "https://graph.microsoft.com/v1.0/me/drive/root:"
-            f"/{self.onedrive_folder_key}/{filename}:/createUploadSession")
+            f"/{self.onedrive_folder_key}/{today}/{filename}:/createUploadSession")
         session_body = {
             "item": {
                 "@microsoft.graph.conflictBehavior": "rename",
@@ -336,8 +340,7 @@ class DbBackupConfigure(models.Model):
                         os.path.join(local_dir, f"{part}.zip"))
             os.remove(zip_path)
             _logger.info(
-                "ZIP successfully split and removed for %s", self.name
-            )
+                "ZIP successfully split and removed for %s", self.name)
         except Exception as e:
             _logger.exception(
                 "Extract + split failed for %s", self.name
@@ -402,3 +405,55 @@ class DbBackupConfigure(models.Model):
                     ).send_mail(rec.id, force_send=True)
 
                 break
+
+    def _get_gdrive_daily_parent_id(self, date_str):
+        """Return Google Drive folder ID for given date under configured parent."""
+        if self.gdrive_token_validity <= fields.Datetime.now():
+            _logger.debug("[GDRIVE] Token expired, refreshing")
+            self.generate_gdrive_refresh_token()
+
+        headers = {
+            "Authorization": f"Bearer {self.gdrive_access_token}",
+            "Content-Type": "application/json",
+        }
+
+        # Search existing daily folder
+        q = (
+            f"name='{date_str}' and "
+            "mimeType='application/vnd.google-apps.folder' and "
+            f"'{self.google_drive_folder_key}' in parents and trashed=false"
+        )
+        r = requests.get(
+            "https://www.googleapis.com/drive/v3/files",
+            headers=headers,
+            params={"q": q, "fields": "files(id)"},
+        )
+        if r.status_code != 200:
+            raise UserError(_("Google Drive folder search failed: %s") % r.text)
+
+        files = r.json().get("files", [])
+        if files:
+            folder_id = files[0]["id"]
+            _logger.debug("[GDRIVE] Reuse daily folder %s (%s)", date_str, folder_id)
+            return folder_id
+
+        # Create daily folder
+        r = requests.post(
+            "https://www.googleapis.com/drive/v3/files",
+            headers=headers,
+            json={
+                "name": date_str,
+                "mimeType": "application/vnd.google-apps.folder",
+                "parents": [self.google_drive_folder_key],
+            },
+            params={"fields": "id"},
+        )
+        if r.status_code not in (200, 201):
+            raise UserError(_("Google Drive folder create failed: %s") % r.text)
+
+        folder_id = r.json().get("id")
+        if not folder_id:
+            raise UserError(_("Google Drive did not return daily folder id."))
+
+        _logger.info("[GDRIVE] Daily folder created %s (%s)", date_str, folder_id)
+        return folder_id
