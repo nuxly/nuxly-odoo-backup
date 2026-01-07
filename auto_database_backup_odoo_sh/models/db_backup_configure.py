@@ -13,7 +13,7 @@ from odoo.exceptions import UserError
 import zipfile
 _logger = logging.getLogger(__name__)
 CHUNK_SIZE = 62914560  # 60 MiB = 60 * 1024 * 1024
-SPLIT_SIZE_MB = 200
+SPLIT_SIZE_MB = 1500
 BACKUP_PARTS_DIR = "/tmp/backup_parts"
 
 class DbBackupConfigure(models.Model):
@@ -35,7 +35,7 @@ class DbBackupConfigure(models.Model):
         _logger.debug("Skipping DB name check for backup config.")
         return
 
-    def _schedule_auto_backup(self):
+    def _schedule_auto_backup(self, split_size_mb=SPLIT_SIZE_MB):
         """
         Override Odoo's base method to add support for:
         - Creating and zipping Odoo.sh backups from /backup.daily
@@ -55,7 +55,7 @@ class DbBackupConfigure(models.Model):
             # ========================================
             try:
                 # Odoo.sh: only extract + split
-                rec.extract_and_split_backup()
+                rec.extract_and_split_backup(split_size_mb=split_size_mb)
                 _logger.info(
                     "Backup extract + split finished for %s. Upload deferred to cron.",
                     rec.name
@@ -302,7 +302,7 @@ class DbBackupConfigure(models.Model):
                 self.env.ref('auto_database_backup.mail_template_data_db_backup_failed').send_mail(self.id, force_send=True)
             return False
 
-    def extract_and_split_backup(self):
+    def extract_and_split_backup(self, split_size_mb=SPLIT_SIZE_MB):
         """
         Build ZIP using existing extract logic,
         then split it into parts and delete the ZIP.
@@ -326,7 +326,11 @@ class DbBackupConfigure(models.Model):
             # filename = backup_YYYY-MM-DD.zip
             base_name = filename.replace(".zip", "")
             split_prefix = os.path.join(local_dir, f"{base_name}_part_")
-            cmd = f"split -b {SPLIT_SIZE_MB}M {zip_path} {split_prefix}"
+            cmd = f"split -b {split_size_mb}M {zip_path} {split_prefix}"
+            _logger.info(
+                "Splitting ZIP with split_size_mb=%s for %s",
+                split_size_mb, self.name
+            )
             _logger.info(
                 "Splitting ZIP for %s with command: %s",
                 self.name,
