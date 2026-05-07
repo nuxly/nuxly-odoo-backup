@@ -3,7 +3,7 @@
 #
 #    Cybrosys Technologies Pvt. Ltd.
 #
-#    Copyright (C) 2023-TODAY Cybrosys Technologies(<https://www.cybrosys.com>)
+#    Copyright (C) 2025-TODAY Cybrosys Technologies(<https://www.cybrosys.com>)
 #    Author: Cybrosys Techno Solutions (odoo@cybrosys.com)
 #
 #    You can modify it under the terms of the GNU LESSER
@@ -21,19 +21,17 @@
 ###############################################################################
 {
     'name': "Automatic Database Backup To Local Server, Remote Server,"
-            "Google Drive, Dropbox, Onedrive, Nextcloud and Amazon S3",
-    'version': '16.0.6.0.2',
+            "Google Drive, Dropbox, Onedrive, Nextcloud and Amazon S3 Odoo19",
+    'version': '19.0.1.0.0',
     'live_test_url': 'https://youtu.be/Q2yMZyYjuTI',
     'category': 'Extra Tools',
     'summary': 'Odoo Database Backup, Automatic Backup, Database Backup, Automatic Backup,Database auto-backup, odoo backup'
                'google drive, dropbox, nextcloud, amazon S3, onedrive or '
-               'remote server, Odoo17, Backup, Database, Odoo Apps',
-    'description': 'This module has been developed for creating database '
-                   'backups automatically and store it to the different '
-                   'locations,database backup, backup, Google Drive, Dropbox, Onedrive, Nextcloud, Amazon S3, automatic backup',
+               'remote server, Odoo19, Backup, Database, Odoo Apps',
+    'description': 'Odoo Database Backup, Database Backup, Automatic Backup, automatic database backup, odoo19, odoo apps,backup, automatic backup,odoo19 automatic database backup,backup google drive,backup dropbox, backup nextcloud, backup amazon S3, backup onedrive',
     'author': "Cybrosys Techno Solutions",
-    'maintainer': 'Cybrosys Techno Solutions',
     'company': 'Cybrosys Techno Solutions',
+    'maintainer': 'Cybrosys Techno Solutions',
     'website': "https://www.cybrosys.com",
     'depends': ['base', 'mail'],
     'data': [
