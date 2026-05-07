@@ -32,16 +32,16 @@ class DbBackupConfigure(models.Model):
         _logger.debug("Skipping DB name check for backup config.")
         return
 
-    def _schedule_auto_backup(self):
+    def _schedule_auto_backup(self, frequency):
         """
         Override Odoo's base method to add support for:
         - Creating and zipping Odoo.sh backups from /backup.daily
         - Sending them to Google Drive or OneDrive
         - Auto-removing old backups from cloud if enabled
         """
-        super()._schedule_auto_backup() 
+        super()._schedule_auto_backup(frequency)
         _logger.debug("========= SCHEDULE BACKUP CALL =========")
-        records = self.search([])
+        records = self.search([('backup_frequency', '=', frequency)])
         for rec in records:
             if rec.backup_destination not in ['odoo_sh_gdrive', 'odoo_sh_onedrive']:
                 continue
@@ -63,7 +63,7 @@ class DbBackupConfigure(models.Model):
                                 f"https://www.googleapis.com/drive/v3/files/{file['id']}?fields=createdTime",
                                 headers=headers)
                             created = meta.json().get('createdTime', '')[:19].replace('T', ' ')
-                            days = (fields.Datetime.now() - fields.datetime.strptime(created, '%Y-%m-%d %H:%M:%S')).days
+                            days = (fields.Datetime.now() - datetime.strptime(created, '%Y-%m-%d %H:%M:%S')).days
                             if days >= rec.days_to_remove:
                                 requests.delete(f"https://www.googleapis.com/drive/v3/files/{file['id']}", headers=headers)
                 # Onedrive Backup Odoo.sh
@@ -75,7 +75,7 @@ class DbBackupConfigure(models.Model):
                         response = requests.get(list_url, headers=headers)
                         for file in response.json().get('value', []):
                             created = file['createdDateTime'][:19].replace('T', ' ')
-                            days = (fields.Datetime.now() - fields.datetime.strptime(created, '%Y-%m-%d %H:%M:%S')).days
+                            days = (fields.Datetime.now() - datetime.strptime(created, '%Y-%m-%d %H:%M:%S')).days
                             if days >= rec.days_to_remove:
                                 delete_url = f"https://graph.microsoft.com/v1.0/me/drive/items/{file['id']}"
                                 requests.delete(delete_url, headers=headers)
