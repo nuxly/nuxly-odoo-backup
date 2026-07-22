@@ -22,6 +22,12 @@
             <attribute name="invisible">backup_destination == 'odoo_sh_gdrive' or backup_destination == 'odoo_sh_onedrive'</attribute>
         </field>
 
+        <!-- Let Odoo.sh destinations opt out of the filestore (DB dump only) -->
+        <field name="backup_format" position="after">
+            <field name="include_filestore"
+                   invisible="backup_destination != 'odoo_sh_gdrive' and backup_destination != 'odoo_sh_onedrive'"/>
+        </field>
+
         <!-- GDrive-specific fields visible for odoo_sh_gdrive and google_drive -->
         <field name="gdrive_client_key" position="attributes">
             <attribute name="invisible">backup_destination != 'odoo_sh_gdrive' and backup_destination != 'google_drive'</attribute>

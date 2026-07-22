@@ -25,6 +25,7 @@ class DbBackupConfigure(models.Model):
         ('odoo_sh_onedrive', 'Odoo.sh + OneDrive')])
     db_name = fields.Char(required=False, default="database_backup")
     master_pwd = fields.Char(required=False)
+    include_filestore = fields.Boolean(string="Include Filestore", default=False, help="If disabled, only the database dump is backed up (no attachments). Useful when the filestore is too large to justify the extra Odoo.sh disk space needed to build the backup.")
 
     @api.constrains('db_name')
     def _check_db_credentials(self):
@@ -76,10 +77,33 @@ class DbBackupConfigure(models.Model):
             continue
 
 
+    @staticmethod
+    def _find_daily_sql_dump(base_path):
+        """
+        Locate the compressed SQL dump for Odoo.sh's automatic daily backup.
+
+        Odoo.sh keeps each backup as sibling entries sharing one base name:
+        a directory (filestore), a '.sql.gz' (compressed DB dump) and a
+        '.json' (manifest). The automatic daily backup's base name always
+        contains 'daily' (on-demand backups use 'manual'/'update' instead),
+        so filtering '.sql.gz' files containing 'daily' isolates exactly
+        the one we want, without touching manual/update snapshots.
+        """
+        for entry in os.listdir(base_path):
+            if entry.lower().endswith(".sql.gz") and "daily" in entry.lower():
+                return os.path.join(base_path, entry)
+        return None
+
     def _extract_daily_backup_zip(self):
         """
-        Scan folder /backup.daily in Odoo.sh and zip any folder or file containing 'daily'
-        into a ZIP archive for cloud upload.
+        Build a ZIP archive for cloud upload from Odoo.sh's '/backup.daily'.
+
+        The compressed SQL dump is always included, kept gzip-compressed
+        as-is (no reason to decompress it just to re-compress it in the
+        ZIP). The filestore is only added when 'include_filestore' is
+        enabled on this backup config; otherwise an empty 'filestore/'
+        entry is still written so the ZIP keeps the same structure as
+        Odoo.sh's own "database dump without filestore" export.
         """
         base_path = "backup.daily"
         today = datetime.today().strftime('%Y-%m-%d')
@@ -87,35 +111,45 @@ class DbBackupConfigure(models.Model):
         _logger.debug("Scanning directory: %s", base_path)
         if not os.path.isdir(base_path):
             raise UserError(_("The folder '%s' was not found.") % base_path)
-        entries = os.listdir(base_path)
-        _logger.debug("Entries found: %s", entries)
-        found = False
-        with zipfile.ZipFile(zip_filepath, "w", zipfile.ZIP_DEFLATED) as z:
-            for entry in entries:
-                if "daily" not in entry.lower():
-                    continue
-                abs_daily = os.path.join(base_path, entry)
-                if not os.path.isdir(abs_daily):
-                    continue
-                # Search ONLY for filestore
-                for root, dirs, files in os.walk(abs_daily):
-                    if "filestore" not in dirs:
-                        continue
-                    filestore_path = os.path.join(root, "filestore")
-                    _logger.debug("Found filestore: %s", filestore_path)
 
-                    # Add all files inside the filestore
-                    for r, dd, ff in os.walk(filestore_path):
-                        for f in ff:
-                            abs_file = os.path.join(r, f)
-                            # Path inside zip (keep the daily folder name)
-                            rel_file = os.path.relpath(abs_file, base_path)
-                            z.write(abs_file, arcname=rel_file)
-                    found = True
-                    break  # stop scanning after filestore found
-        if not found:
-            _logger.debug("No filestore found in any 'daily' folder.")
-            return None, None
+        sql_dump_path = self._find_daily_sql_dump(base_path)
+        if not sql_dump_path:
+            raise UserError(
+                _("No daily SQL dump ('*.sql.gz') found in '%s'.") % base_path)
+
+        with zipfile.ZipFile(zip_filepath, "w", zipfile.ZIP_DEFLATED) as z:
+            z.write(sql_dump_path, arcname="dump.sql.gz")
+            _logger.debug("Added SQL dump to zip: %s", sql_dump_path)
+
+            if self.include_filestore:
+                for entry in os.listdir(base_path):
+                    if "daily" not in entry.lower():
+                        continue
+                    abs_daily = os.path.join(base_path, entry)
+                    if not os.path.isdir(abs_daily):
+                        continue
+                    # Search ONLY for filestore
+                    for root, dirs, files in os.walk(abs_daily):
+                        if "filestore" not in dirs:
+                            continue
+                        filestore_path = os.path.join(root, "filestore")
+                        _logger.debug("Found filestore: %s", filestore_path)
+
+                        # Add all files inside the filestore
+                        for r, dd, ff in os.walk(filestore_path):
+                            for f in ff:
+                                abs_file = os.path.join(r, f)
+                                # Path inside zip (keep the daily folder name)
+                                rel_file = os.path.relpath(abs_file, base_path)
+                                z.write(abs_file, arcname=rel_file)
+                        break  # stop scanning after filestore found
+            else:
+                # Keep an empty 'filestore/' entry to mirror Odoo.sh's own
+                # "without filestore" export structure.
+                z.writestr(zipfile.ZipInfo("filestore/"), "")
+                _logger.debug(
+                    "include_filestore disabled: wrote empty filestore/ entry")
+
         _logger.debug("Created zip archive: %s", zip_filepath)
         # Log final size
         final_size = os.path.getsize(zip_filepath)
@@ -225,32 +259,34 @@ class DbBackupConfigure(models.Model):
 
     def _estimate_daily_backup_size(self):
         """
-        Estimate the total size based STRICTLY on what _extract_daily_backup_zip()
-        will copy:
-        - Any file containing 'daily' in backup.daily
-        - The 'filestore' folder inside any 'daily' directory
+        Estimate the total size of what _extract_daily_backup_zip() will
+        actually copy:
+        - The daily SQL dump ('*.sql.gz') -- always included
+        - The 'filestore' folder inside the daily backup directory -- only
+          when 'include_filestore' is enabled on this config
         """
         base_path = "backup.daily"
         total_size = 0
         _logger.debug("Estimating backup size from '%s'...", base_path)
         if not os.path.isdir(base_path):
             raise UserError(_("Backup folder '%s' not found.") % base_path)
-        entries = os.listdir(base_path)
-        _logger.debug("Entries found: %s", entries)
-        for entry in entries:
-            if 'daily' not in entry.lower():
-                continue
-            abs_src = os.path.join(base_path, entry)
-            # === CASE 1: Simple file ===
-            if os.path.isfile(abs_src):
-                size = os.path.getsize(abs_src)
-                total_size += size
-                _logger.debug("Including daily file: %s (%.2f MB)", abs_src, size / (1024**2))
-            # === CASE 2: Directory ===
-            elif os.path.isdir(abs_src):
+
+        sql_dump_path = self._find_daily_sql_dump(base_path)
+        if sql_dump_path:
+            size = os.path.getsize(sql_dump_path)
+            total_size += size
+            _logger.debug("Including daily SQL dump: %s (%.2f MB)",
+                          sql_dump_path, size / (1024**2))
+
+        if self.include_filestore:
+            for entry in os.listdir(base_path):
+                if 'daily' not in entry.lower():
+                    continue
+                abs_src = os.path.join(base_path, entry)
+                if not os.path.isdir(abs_src):
+                    continue
                 _logger.debug("Scanning directory for filestore: %s", abs_src)
                 for root, dirs, files in os.walk(abs_src):
-
                     # Look only for 'filestore'
                     for d in dirs:
                         if d == 'filestore':
