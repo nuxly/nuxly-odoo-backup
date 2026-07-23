@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 from odoo import models, fields, api, _
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 import requests
 import logging
@@ -15,6 +15,7 @@ _logger = logging.getLogger(__name__)
 CHUNK_SIZE = 62914560  # 60 MiB = 60 * 1024 * 1024
 SPLIT_SIZE_MB = 1500
 BACKUP_PARTS_DIR = "/tmp/backup_parts"
+ONEDRIVE_SCOPE = ['offline_access openid Files.ReadWrite.All']
 
 class DbBackupConfigure(models.Model):
     _inherit = 'db.backup.configure'
@@ -255,7 +256,45 @@ class DbBackupConfigure(models.Model):
                     raise UserError(_("Upload failed for chunk %s/%s.") % (i + 1, num_chunks))
         _logger.debug("Upload to OneDrive completed for file '%s'", filename)
 
+    def generate_onedrive_refresh_token(self):
+        """
+        Refresh the OneDrive access token (base module override).
 
+        The base implementation reads 'web.base.url' via 'request.env',
+        but 'request' is only bound during an actual HTTP request. This
+        method also runs from 'cron_upload_backup_part' (a scheduled
+        action, no HTTP request), where 'request.env' raises
+        'RuntimeError: object unbound'. Using 'self.env' instead works
+        identically in both contexts.
+        """
+        base_url = self.env['ir.config_parameter'].sudo().get_param('web.base.url')
+        headers = {"Content-type": "application/x-www-form-urlencoded"}
+        data = {
+            'client_id': self.onedrive_client_key,
+            'client_secret': self.onedrive_client_secret,
+            'scope': ONEDRIVE_SCOPE,
+            'grant_type': "refresh_token",
+            'redirect_uri': base_url + '/onedrive/authentication',
+            'refresh_token': self.onedrive_refresh_token
+        }
+        try:
+            res = requests.post(
+                "https://login.microsoftonline.com/common/oauth2/v2.0/token",
+                data=data, headers=headers)
+            res.raise_for_status()
+            response = res.content and res.json() or {}
+            if response:
+                expires_in = response.get('expires_in')
+                self.write({
+                    'onedrive_access_token': response.get('access_token'),
+                    'onedrive_refresh_token': response.get('refresh_token'),
+                    'onedrive_token_validity': fields.Datetime.now() + timedelta(
+                        seconds=expires_in) if expires_in else False,
+                })
+        except requests.HTTPError as error:
+            _logger.exception("Bad microsoft onedrive request : %s !",
+                              error.response.content)
+            raise error
 
     def _estimate_daily_backup_size(self):
         """
