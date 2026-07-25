@@ -90,6 +90,12 @@
           <span style="font-size:16px; color:#333;">Uploads zipped backups with logs</span>
         </div>
       </div>
+      <div class="col-md-6">
+        <div style="display:flex; align-items:center; padding:15px; border:1px solid #eee; border-radius:8px; margin-bottom:15px; background:#f9f9f9;">
+          <img src="assets/icons/folder-zip.svg" style="width:40px; height:40px; margin-right:15px;">
+          <span style="font-size:16px; color:#333;">"Include Filestore" checkbox: back up the database only, to save disk space on large instances</span>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -124,6 +130,11 @@
       <p>
         Our module simply reuses the daily backup already generated in <code style="color: #be1727;">/backup.daily</code> by Odoo.sh.
         It zips it, and automatically uploads it to your chosen <strong>Google Drive</strong> or <strong>OneDrive</strong>.
+      </p>
+      <p>
+        For instances with a very large or fast-growing filestore, the <strong>"Include Filestore"</strong> option can be
+        disabled so only the database dump is backed up — no need to allocate extra Odoo.sh disk space just to
+        generate and delete a much bigger archive every day.
       </p>
     </div>
   </div>
