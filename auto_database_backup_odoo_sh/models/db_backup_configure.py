@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 from odoo import models, fields, api, _
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 import requests
 import logging
@@ -13,6 +13,9 @@ from odoo.exceptions import UserError
 import zipfile
 _logger = logging.getLogger(__name__)
 CHUNK_SIZE = 62914560  # 60 MiB = 60 * 1024 * 1024
+SPLIT_SIZE_MB = 1500
+BACKUP_PARTS_DIR = "/tmp/backup_parts"
+ONEDRIVE_SCOPE = ['offline_access openid Files.ReadWrite.All']
 
 class DbBackupConfigure(models.Model):
     _inherit = 'db.backup.configure'
@@ -23,6 +26,7 @@ class DbBackupConfigure(models.Model):
         ('odoo_sh_onedrive', 'Odoo.sh + OneDrive')])
     db_name = fields.Char(required=False, default="database_backup")
     master_pwd = fields.Char(required=False)
+    include_filestore = fields.Boolean(string="Include Filestore", default=False, help="If disabled, only the database dump is backed up (no attachments). Useful when the filestore is too large to justify the extra Odoo.sh disk space needed to build the backup.")
 
     @api.constrains('db_name')
     def _check_db_credentials(self):
@@ -33,7 +37,7 @@ class DbBackupConfigure(models.Model):
         _logger.debug("Skipping DB name check for backup config.")
         return
 
-    def _schedule_auto_backup(self):
+    def _schedule_auto_backup(self, split_size_mb=SPLIT_SIZE_MB):
         """
         Override Odoo's base method to add support for:
         - Creating and zipping Odoo.sh backups from /backup.daily
@@ -43,73 +47,64 @@ class DbBackupConfigure(models.Model):
         super()._schedule_auto_backup() 
         _logger.debug("========= SCHEDULE BACKUP CALL =========")
         records = self.search([])
-        try:
-            for rec in records:
-                if rec.backup_destination not in ['odoo_sh_gdrive', 'odoo_sh_onedrive']:
-                    continue
-                
-                # ========= PRE-CHECK DISK SPACE =========
-                if not rec._check_disk_space_before_backup():
-                    continue
-                # ========================================
+        for rec in records:
+            if rec.backup_destination not in ['odoo_sh_gdrive', 'odoo_sh_onedrive']:
+                continue
+            
+            # ========= PRE-CHECK DISK SPACE =========
+            if not rec._check_disk_space_before_backup():
+                continue
+            # ========================================
+            try:
+                # Odoo.sh: only extract + split
+                rec.extract_and_split_backup(split_size_mb=split_size_mb)
+                _logger.info(
+                    "Backup extract + split finished for %s. Upload deferred to cron.",
+                    rec.name
+                )
+            except Exception as e:
+                _logger.exception(
+                    "Backup extract + split failed for %s", rec.name
+                )
+                rec.generated_exception = str(e)
+                if rec.notify_user:
+                    self.env.ref(
+                        'auto_database_backup.mail_template_data_db_backup_failed'
+                    ).send_mail(rec.id, force_send=True)
 
-                try:
-                    filename, content = rec._extract_daily_backup_zip()
-                except Exception as e:
-                    _logger.warning("Error extracting daily backup for '%s': %s", rec.name, str(e))
-                    rec.generated_exception = f"Backup extraction error: {e}"
-                    if rec.notify_user:
-                        self.env.ref('auto_database_backup.mail_template_data_db_backup_failed').send_mail(rec.id, force_send=True)
-                    continue
-                if not filename:
-                    continue
-                try:
-                    # Google Drive backup Odoo.sh
-                    if rec.backup_destination == 'odoo_sh_gdrive':
-                        rec._send_to_gdrive(filename, content)
-                        if rec.auto_remove:
-                            headers = {"Authorization": f"Bearer {rec.gdrive_access_token}"}
-                            query = f"parents = '{rec.google_drive_folder_key}'"
-                            files_req = requests.get(
-                                f"https://www.googleapis.com/drive/v3/files?q={query}",
-                                headers=headers)
-                            for file in files_req.json().get('files', []):
-                                meta = requests.get(
-                                    f"https://www.googleapis.com/drive/v3/files/{file['id']}?fields=createdTime",
-                                    headers=headers)
-                                created = meta.json().get('createdTime', '')[:19].replace('T', ' ')
-                                days = (fields.Datetime.now() - fields.datetime.strptime(created, '%Y-%m-%d %H:%M:%S')).days
-                                if days >= rec.days_to_remove:
-                                    requests.delete(f"https://www.googleapis.com/drive/v3/files/{file['id']}", headers=headers)
-                    # Onedrive Backup Odoo.sh
-                    elif rec.backup_destination == 'odoo_sh_onedrive':
-                        rec._send_to_onedrive(filename, content)
-                        if rec.auto_remove:
-                            headers = {'Authorization': f"Bearer {rec.onedrive_access_token}"}
-                            list_url = f"https://graph.microsoft.com/v1.0/me/drive/items/{rec.onedrive_folder_key}/children"
-                            response = requests.get(list_url, headers=headers)
-                            for file in response.json().get('value', []):
-                                created = file['createdDateTime'][:19].replace('T', ' ')
-                                days = (fields.Datetime.now() - fields.datetime.strptime(created, '%Y-%m-%d %H:%M:%S')).days
-                                if days >= rec.days_to_remove:
-                                    delete_url = f"https://graph.microsoft.com/v1.0/me/drive/items/{file['id']}"
-                                    requests.delete(delete_url, headers=headers)
-                    if rec.notify_user:
-                        self.env.ref('auto_database_backup.mail_template_data_db_backup_successful').send_mail(rec.id, force_send=True)
-                except Exception as e:
-                    rec.generated_exception = str(e)
-                    _logger.exception("ODoo.sh Backup failed: %s", e)
-                    if rec.notify_user:
-                        self.env.ref('auto_database_backup.mail_template_data_db_backup_failed').send_mail(rec.id, force_send=True)
-        finally:
-            # Clean /tmp folder after all backups (even if failed)
-            os.system("rm -rf /tmp/* || true")
-            _logger.debug("Temporary folder /tmp cleaned up after backup process.")
+            # IMPORTANT:
+            # Upload + auto_remove + success mail
+            # are handled by cron_upload_backup_part
+            continue
+
+
+    @staticmethod
+    def _find_daily_sql_dump(base_path):
+        """
+        Locate the compressed SQL dump for Odoo.sh's automatic daily backup.
+
+        Odoo.sh keeps each backup as sibling entries sharing one base name:
+        a directory (filestore), a '.sql.gz' (compressed DB dump) and a
+        '.json' (manifest). The automatic daily backup's base name always
+        contains 'daily' (on-demand backups use 'manual'/'update' instead),
+        so filtering '.sql.gz' files containing 'daily' isolates exactly
+        the one we want, without touching manual/update snapshots.
+        """
+        for entry in os.listdir(base_path):
+            if entry.lower().endswith(".sql.gz") and "daily" in entry.lower():
+                return os.path.join(base_path, entry)
+        return None
 
     def _extract_daily_backup_zip(self):
         """
-        Scan folder /backup.daily in Odoo.sh and zip any folder or file containing 'daily'
-        into a ZIP archive for cloud upload.
+        Build a ZIP archive for cloud upload from Odoo.sh's '/backup.daily'.
+
+        The compressed SQL dump is always included, kept gzip-compressed
+        as-is (no reason to decompress it just to re-compress it in the
+        ZIP). The filestore is only added when 'include_filestore' is
+        enabled on this backup config; otherwise an empty 'filestore/'
+        entry is still written so the ZIP keeps the same structure as
+        Odoo.sh's own "database dump without filestore" export.
         """
         base_path = "backup.daily"
         today = datetime.today().strftime('%Y-%m-%d')
@@ -117,35 +112,45 @@ class DbBackupConfigure(models.Model):
         _logger.debug("Scanning directory: %s", base_path)
         if not os.path.isdir(base_path):
             raise UserError(_("The folder '%s' was not found.") % base_path)
-        entries = os.listdir(base_path)
-        _logger.debug("Entries found: %s", entries)
-        found = False
-        with zipfile.ZipFile(zip_filepath, "w", zipfile.ZIP_DEFLATED) as z:
-            for entry in entries:
-                if "daily" not in entry.lower():
-                    continue
-                abs_daily = os.path.join(base_path, entry)
-                if not os.path.isdir(abs_daily):
-                    continue
-                # Search ONLY for filestore
-                for root, dirs, files in os.walk(abs_daily):
-                    if "filestore" not in dirs:
-                        continue
-                    filestore_path = os.path.join(root, "filestore")
-                    _logger.debug("Found filestore: %s", filestore_path)
 
-                    # Add all files inside the filestore
-                    for r, dd, ff in os.walk(filestore_path):
-                        for f in ff:
-                            abs_file = os.path.join(r, f)
-                            # Path inside zip (keep the daily folder name)
-                            rel_file = os.path.relpath(abs_file, base_path)
-                            z.write(abs_file, arcname=rel_file)
-                    found = True
-                    break  # stop scanning after filestore found
-        if not found:
-            _logger.debug("No filestore found in any 'daily' folder.")
-            return None, None
+        sql_dump_path = self._find_daily_sql_dump(base_path)
+        if not sql_dump_path:
+            raise UserError(
+                _("No daily SQL dump ('*.sql.gz') found in '%s'.") % base_path)
+
+        with zipfile.ZipFile(zip_filepath, "w", zipfile.ZIP_DEFLATED) as z:
+            z.write(sql_dump_path, arcname="dump.sql.gz")
+            _logger.debug("Added SQL dump to zip: %s", sql_dump_path)
+
+            if self.include_filestore:
+                for entry in os.listdir(base_path):
+                    if "daily" not in entry.lower():
+                        continue
+                    abs_daily = os.path.join(base_path, entry)
+                    if not os.path.isdir(abs_daily):
+                        continue
+                    # Search ONLY for filestore
+                    for root, dirs, files in os.walk(abs_daily):
+                        if "filestore" not in dirs:
+                            continue
+                        filestore_path = os.path.join(root, "filestore")
+                        _logger.debug("Found filestore: %s", filestore_path)
+
+                        # Add all files inside the filestore
+                        for r, dd, ff in os.walk(filestore_path):
+                            for f in ff:
+                                abs_file = os.path.join(r, f)
+                                # Path inside zip (keep the daily folder name)
+                                rel_file = os.path.relpath(abs_file, base_path)
+                                z.write(abs_file, arcname=rel_file)
+                        break  # stop scanning after filestore found
+            else:
+                # Keep an empty 'filestore/' entry to mirror Odoo.sh's own
+                # "without filestore" export structure.
+                z.writestr(zipfile.ZipInfo("filestore/"), "")
+                _logger.debug(
+                    "include_filestore disabled: wrote empty filestore/ entry")
+
         _logger.debug("Created zip archive: %s", zip_filepath)
         # Log final size
         final_size = os.path.getsize(zip_filepath)
@@ -164,9 +169,12 @@ class DbBackupConfigure(models.Model):
             "Authorization": f"Bearer {self.gdrive_access_token}",
             "Content-Type": "application/json; charset=UTF-8",
             "X-Upload-Content-Type": "application/zip",}
+        today = fields.Date.today().strftime('%Y-%m-%d')
+        parent_id = self._get_gdrive_daily_parent_id(today)
         metadata = {
             "name": filename,
-            "parents": [self.google_drive_folder_key],}
+            "parents": [parent_id],
+        }
         # 1. Create upload session "resumable" for large files
         session = requests.post(
             "https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable",
@@ -188,7 +196,7 @@ class DbBackupConfigure(models.Model):
             _logger.debug("Upload to Google Drive response code: %s", upload.status_code)
             _logger.debug("Upload response content: %s", upload.text)
             upload.raise_for_status()
-        os.remove(filepath)
+        # os.remove(filepath)
         _logger.debug("Deleted temp zip: %s", filepath)
 
     # Upload a ZIP backup to OneDrive
@@ -204,7 +212,17 @@ class DbBackupConfigure(models.Model):
         headers = {
             'Authorization': f'Bearer {self.onedrive_access_token}',
             'Content-Type': 'application/json'}
-        session_url = f"https://graph.microsoft.com/v1.0/me/drive/items/{self.onedrive_folder_key}:/{filename}:/createUploadSession"
+        _logger.warning(
+            "ONEDRIVE DEBUG | access_token=%s | refresh_token=%s | validity=%s | now=%s",
+            self.onedrive_access_token[:10] + "..." if self.onedrive_access_token else None,
+            bool(self.onedrive_refresh_token),
+            self.onedrive_token_validity,
+            fields.Datetime.now())
+        # session_url = f"https://graph.microsoft.com/v1.0/me/drive/items/{self.onedrive_folder_key}:/{filename}:/createUploadSession"
+        today = fields.Date.today().strftime('%Y-%m-%d')
+        session_url = (
+            "https://graph.microsoft.com/v1.0/me/drive/root:"
+            f"/{self.onedrive_folder_key}/{today}/{filename}:/createUploadSession")
         session_body = {
             "item": {
                 "@microsoft.graph.conflictBehavior": "rename",
@@ -238,36 +256,76 @@ class DbBackupConfigure(models.Model):
                     raise UserError(_("Upload failed for chunk %s/%s.") % (i + 1, num_chunks))
         _logger.debug("Upload to OneDrive completed for file '%s'", filename)
 
+    def generate_onedrive_refresh_token(self):
+        """
+        Refresh the OneDrive access token (base module override).
 
+        The base implementation reads 'web.base.url' via 'request.env',
+        but 'request' is only bound during an actual HTTP request. This
+        method also runs from 'cron_upload_backup_part' (a scheduled
+        action, no HTTP request), where 'request.env' raises
+        'RuntimeError: object unbound'. Using 'self.env' instead works
+        identically in both contexts.
+        """
+        base_url = self.env['ir.config_parameter'].sudo().get_param('web.base.url')
+        headers = {"Content-type": "application/x-www-form-urlencoded"}
+        data = {
+            'client_id': self.onedrive_client_key,
+            'client_secret': self.onedrive_client_secret,
+            'scope': ONEDRIVE_SCOPE,
+            'grant_type': "refresh_token",
+            'redirect_uri': base_url + '/onedrive/authentication',
+            'refresh_token': self.onedrive_refresh_token
+        }
+        try:
+            res = requests.post(
+                "https://login.microsoftonline.com/common/oauth2/v2.0/token",
+                data=data, headers=headers)
+            res.raise_for_status()
+            response = res.content and res.json() or {}
+            if response:
+                expires_in = response.get('expires_in')
+                self.write({
+                    'onedrive_access_token': response.get('access_token'),
+                    'onedrive_refresh_token': response.get('refresh_token'),
+                    'onedrive_token_validity': fields.Datetime.now() + timedelta(
+                        seconds=expires_in) if expires_in else False,
+                })
+        except requests.HTTPError as error:
+            _logger.exception("Bad microsoft onedrive request : %s !",
+                              error.response.content)
+            raise error
 
     def _estimate_daily_backup_size(self):
         """
-        Estimate the total size based STRICTLY on what _extract_daily_backup_zip()
-        will copy:
-        - Any file containing 'daily' in backup.daily
-        - The 'filestore' folder inside any 'daily' directory
+        Estimate the total size of what _extract_daily_backup_zip() will
+        actually copy:
+        - The daily SQL dump ('*.sql.gz') -- always included
+        - The 'filestore' folder inside the daily backup directory -- only
+          when 'include_filestore' is enabled on this config
         """
         base_path = "backup.daily"
         total_size = 0
         _logger.debug("Estimating backup size from '%s'...", base_path)
         if not os.path.isdir(base_path):
             raise UserError(_("Backup folder '%s' not found.") % base_path)
-        entries = os.listdir(base_path)
-        _logger.debug("Entries found: %s", entries)
-        for entry in entries:
-            if 'daily' not in entry.lower():
-                continue
-            abs_src = os.path.join(base_path, entry)
-            # === CASE 1: Simple file ===
-            if os.path.isfile(abs_src):
-                size = os.path.getsize(abs_src)
-                total_size += size
-                _logger.debug("Including daily file: %s (%.2f MB)", abs_src, size / (1024**2))
-            # === CASE 2: Directory ===
-            elif os.path.isdir(abs_src):
+
+        sql_dump_path = self._find_daily_sql_dump(base_path)
+        if sql_dump_path:
+            size = os.path.getsize(sql_dump_path)
+            total_size += size
+            _logger.debug("Including daily SQL dump: %s (%.2f MB)",
+                          sql_dump_path, size / (1024**2))
+
+        if self.include_filestore:
+            for entry in os.listdir(base_path):
+                if 'daily' not in entry.lower():
+                    continue
+                abs_src = os.path.join(base_path, entry)
+                if not os.path.isdir(abs_src):
+                    continue
                 _logger.debug("Scanning directory for filestore: %s", abs_src)
                 for root, dirs, files in os.walk(abs_src):
-
                     # Look only for 'filestore'
                     for d in dirs:
                         if d == 'filestore':
@@ -318,3 +376,169 @@ class DbBackupConfigure(models.Model):
             if self.notify_user:
                 self.env.ref('auto_database_backup.mail_template_data_db_backup_failed').send_mail(self.id, force_send=True)
             return False
+
+    def extract_and_split_backup(self, split_size_mb=SPLIT_SIZE_MB):
+        """
+        Build ZIP using existing extract logic,
+        then split it into parts and delete the ZIP.
+        NO upload here.
+        """
+        self.ensure_one()
+        today = fields.Date.today().strftime('%Y-%m-%d')
+        local_dir = os.path.join(BACKUP_PARTS_DIR, today)
+        os.makedirs(local_dir, exist_ok=True)
+        _logger.info(
+            "=== BACKUP EXTRACT + SPLIT START | %s | %s ===",
+            today,
+            self.name)
+        try:
+            filename, zip_path = self._extract_daily_backup_zip()
+            if not filename or not zip_path:
+                _logger.warning(
+                    "No ZIP generated for %s, nothing to split.", self.name
+                )
+                return
+            # filename = backup_YYYY-MM-DD.zip
+            base_name = filename.replace(".zip", "")
+            split_prefix = os.path.join(local_dir, f"{base_name}_part_")
+            cmd = f"split -b {split_size_mb}M {zip_path} {split_prefix}"
+            _logger.info(
+                "Splitting ZIP with split_size_mb=%s for %s",
+                split_size_mb, self.name
+            )
+            _logger.info(
+                "Splitting ZIP for %s with command: %s",
+                self.name,
+                cmd)
+            os.system(cmd)
+            # rename parts to *.zip
+            for part in os.listdir(local_dir):
+                if part.startswith(f"{base_name}_part_") and not part.endswith(".zip"):
+                    os.rename(
+                        os.path.join(local_dir, part),
+                        os.path.join(local_dir, f"{part}.zip"))
+            os.remove(zip_path)
+            _logger.info(
+                "ZIP successfully split and removed for %s", self.name)
+        except Exception as e:
+            _logger.exception(
+                "Extract + split failed for %s", self.name
+            )
+            self.generated_exception = str(e)
+            raise
+
+    def cron_upload_backup_part(self):
+        """
+        Cron every 5 minutes:
+        - Upload ONE backup part
+        - Send success mail ONLY when last part is sent
+        """
+        today = fields.Date.today().strftime('%Y-%m-%d')
+        local_dir = os.path.join(BACKUP_PARTS_DIR, today)
+        _logger.debug("[BACKUP] Cron upload check | %s", today)
+        if not os.path.isdir(local_dir):
+            _logger.debug("[BACKUP] No local dir %s", local_dir)
+            return
+        parts = sorted(f for f in os.listdir(local_dir) if "part_" in f)
+        if not parts:
+            _logger.debug("[BACKUP] No remaining parts for %s", today)
+            return
+        part_name = parts[0]
+        part_path = os.path.join(local_dir, part_name)
+        _logger.info("[BACKUP] Upload part %s", part_name)
+        records = self.search([
+            ('backup_destination', 'in', ['odoo_sh_gdrive', 'odoo_sh_onedrive'])
+        ])
+        all_ok = True
+        for rec in records:
+            try:
+                if rec.backup_destination == 'odoo_sh_gdrive':
+                    rec._send_to_gdrive(part_name, part_path)
+                elif rec.backup_destination == 'odoo_sh_onedrive':
+                    rec._send_to_onedrive(part_name, part_path)
+            except Exception as e:
+                _logger.exception(
+                    "[BACKUP] Upload failed for %s on %s",
+                    part_name, rec.backup_destination
+                )
+                rec.generated_exception = str(e)
+
+                if rec.notify_user:
+                    self.env.ref(
+                        'auto_database_backup.mail_template_data_db_backup_failed'
+                    ).send_mail(rec.id, force_send=True)
+
+                all_ok = False
+                break
+
+        if not all_ok:
+            return
+        os.remove(part_path)
+        _logger.info("[BACKUP] Part uploaded for all destinations & deleted %s", part_name)
+
+        remaining = [f for f in os.listdir(local_dir) if "part_" in f]
+        if not remaining:
+            _logger.info("[BACKUP] All parts uploaded for %s", today)
+            try:
+                os.rmdir(local_dir)
+                _logger.info("[BACKUP] Temp folder cleaned %s", local_dir)
+            except OSError:
+                _logger.debug("[BACKUP] Temp folder not empty or already removed")
+
+            for rec in records:
+                if rec.notify_user:
+                    self.env.ref(
+                        'auto_database_backup.mail_template_data_db_backup_successful'
+                    ).send_mail(rec.id, force_send=True)
+
+    def _get_gdrive_daily_parent_id(self, date_str):
+        """Return Google Drive folder ID for given date under configured parent."""
+        if self.gdrive_token_validity <= fields.Datetime.now():
+            _logger.debug("[GDRIVE] Token expired, refreshing")
+            self.generate_gdrive_refresh_token()
+
+        headers = {
+            "Authorization": f"Bearer {self.gdrive_access_token}",
+            "Content-Type": "application/json",
+        }
+
+        # Search existing daily folder
+        q = (
+            f"name='{date_str}' and "
+            "mimeType='application/vnd.google-apps.folder' and "
+            f"'{self.google_drive_folder_key}' in parents and trashed=false"
+        )
+        r = requests.get(
+            "https://www.googleapis.com/drive/v3/files",
+            headers=headers,
+            params={"q": q, "fields": "files(id)"},
+        )
+        if r.status_code != 200:
+            raise UserError(_("Google Drive folder search failed: %s") % r.text)
+
+        files = r.json().get("files", [])
+        if files:
+            folder_id = files[0]["id"]
+            _logger.debug("[GDRIVE] Reuse daily folder %s (%s)", date_str, folder_id)
+            return folder_id
+
+        # Create daily folder
+        r = requests.post(
+            "https://www.googleapis.com/drive/v3/files",
+            headers=headers,
+            json={
+                "name": date_str,
+                "mimeType": "application/vnd.google-apps.folder",
+                "parents": [self.google_drive_folder_key],
+            },
+            params={"fields": "id"},
+        )
+        if r.status_code not in (200, 201):
+            raise UserError(_("Google Drive folder create failed: %s") % r.text)
+
+        folder_id = r.json().get("id")
+        if not folder_id:
+            raise UserError(_("Google Drive did not return daily folder id."))
+
+        _logger.info("[GDRIVE] Daily folder created %s (%s)", date_str, folder_id)
+        return folder_id

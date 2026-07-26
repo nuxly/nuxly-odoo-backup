@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<odoo>
+    <data>
+
+        <record id="ir_cron_odoo_sh_upload_backup_part" model="ir.cron">
+            <field name="name">Odoo.sh Backup - Upload one part</field>
+            <field name="model_id" ref="model_db_backup_configure"/>
+            <field name="state">code</field>
+            <field name="code">model.cron_upload_backup_part()</field>
+            <field name="interval_number">20</field>
+            <field name="interval_type">minutes</field>
+            <field name="numbercall">-1</field>
+            <field name="doall">False</field>
+            <field name="active">True</field>
+        </record>
+
+    </data>
+</odoo>
