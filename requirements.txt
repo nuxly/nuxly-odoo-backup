@@ -2,6 +2,6 @@ unidecode
 dropbox
 boto3
 requests
-paramiko
+paramiko==3.5.1
 pyncclient
 nextcloud-api-wrapper
